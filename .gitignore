@@ -1,0 +1,49 @@
+# Entornos virtuales (lo más pesado del proyecto)
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Bytecode y caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Archivos de entorno y credenciales sensibles
+.env
+.env.*
+!.env.example
+
+# Base de datos local y respaldos
+*.sqlite3
+*.db
+*.sql
+*.sql.gz
+
+# Archivos estáticos recolectados y archivos multimedia subidos
+staticfiles/
+media/
+
+# Archivos temporales y registros (logs)
+*.log
+*.tmp
+*.temp
+
+# Pruebas y cobertura de código
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Carpetas de editores e IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+Desktop.ini

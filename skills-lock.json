@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "skills": {
+    "api-design-principles": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/backend-development/skills/api-design-principles/SKILL.md",
+      "computedHash": "cd8889e86d651fbc7ec5f1cdf1920cdc0fa6bd2ca6ca01b8d93e9d2f6b54c7a6"
+    },
+    "django-dbos": {
+      "source": "lewoudar/django-dbos",
+      "sourceType": "github",
+      "skillPath": "skills/django-dbos/SKILL.md",
+      "computedHash": "20c071072acc711d1a5fb35fddc6b2e9ed12c66a18035d1798e63d107156ef33"
+    },
+    "django-expert": {
+      "source": "jeffallan/claude-skills",
+      "sourceType": "github",
+      "skillPath": "skills/django-expert/SKILL.md",
+      "computedHash": "2fc53b7a68f1927bc0d576f8275c041d661e6012ae857ab35e546d78ddf1233b"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "83485963700bcf11d5bf78118facb301676b69d918fee2e45a95e7f1a2840f6c"
+    }
+  }
+}
