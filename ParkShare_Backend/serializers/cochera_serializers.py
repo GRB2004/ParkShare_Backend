@@ -178,3 +178,42 @@ class CocheraAdminValidationSerializer(serializers.Serializer):
 
     estado_cochera = serializers.CharField()
     motivo = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class AdminGarageLandlordSerializer(serializers.ModelSerializer):
+    """Landlord summary embedded in administrative garage review lists."""
+
+    class Meta:
+        model = Usuario
+        fields = ['id_usuario', 'nombre_completo', 'correo', 'telefono']
+
+
+class AdminGarageReviewListSerializer(serializers.ModelSerializer):
+    """Output serializer for administrative garage review listing (`GET /admin/cocheras`)."""
+
+    arrendador = AdminGarageLandlordSerializer(read_only=True)
+    foto_principal = serializers.SerializerMethodField()
+    fotos = FotoCocheraSerializer(many=True, read_only=True)
+    disponibilidades = DisponibilidadSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Cochera
+        fields = [
+            'id_cochera',
+            'nombre',
+            'direccion',
+            'latitud',
+            'longitud',
+            'metros_cuadrados',
+            'espacios_totales',
+            'tarifa_hora',
+            'tipo_vehiculo',
+            'estado_cochera',
+            'foto_principal',
+            'arrendador',
+            'fotos',
+            'disponibilidades',
+        ]
+
+    def get_foto_principal(self, obj: Cochera) -> str | None:
+        return _get_primary_photo_url(obj)

@@ -27,6 +27,7 @@ from ParkShare_Backend.services.cochera_service import (
     get_active_reservations_count,
     get_garage_detail_for_user,
     get_garage_rating_summary,
+    list_admin_garages,
     list_landlord_garages,
     search_nearby_garages,
     update_garage,
@@ -221,6 +222,43 @@ class CocherasCreateUpdateServiceTests(TestCase):
         self.assertEqual(get_garage_detail_for_user(g_pending.id_cochera, self.active_landlord).id_cochera, g_pending.id_cochera)
         self.assertEqual(get_garage_detail_for_user(g_pending.id_cochera, self.admin).id_cochera, g_pending.id_cochera)
         self.assertEqual(get_garage_detail_for_user(g_approved.id_cochera, self.tenant).id_cochera, g_approved.id_cochera)
+
+    def test_list_admin_garages_filters_and_permissions(self):
+        g_pending_1 = create_garage(self.active_landlord, _valid_garage_payload())
+        g_pending_2 = create_garage(self.other_landlord, _valid_garage_payload())
+        g_approved = create_garage(self.active_landlord, _valid_garage_payload())
+        validate_garage_publication(g_approved.id_cochera, self.admin, GarageStatus.APROBADA)
+        g_rejected = create_garage(self.active_landlord, _valid_garage_payload())
+        validate_garage_publication(
+            g_rejected.id_cochera,
+            self.admin,
+            GarageStatus.RECHAZADA,
+            reason='Sin portón seguro.',
+        )
+
+        # Default (None) -> PENDIENTE ordered newest first
+        default_pending = list_admin_garages(self.admin)
+        self.assertEqual(
+            [g.id_cochera for g in default_pending],
+            [g_pending_2.id_cochera, g_pending_1.id_cochera],
+        )
+
+        # Explicit filter APROBADA
+        only_approved = list_admin_garages(self.admin, status_filter='APROBADA')
+        self.assertEqual([g.id_cochera for g in only_approved], [g_approved.id_cochera])
+
+        # TODOS returns all 4 garages
+        all_garages = list_admin_garages(self.admin, status_filter='TODOS')
+        self.assertEqual(len(all_garages), 4)
+
+        # Invalid filter raises DomainValidationError
+        with self.assertRaises(DomainValidationError):
+            list_admin_garages(self.admin, status_filter='INVALIDO')
+
+        # Non-admin raises PermissionDeniedError
+        for unauthorized in (self.active_landlord, self.tenant):
+            with self.assertRaises(PermissionDeniedError):
+                list_admin_garages(unauthorized)
 
 
 class CocherasGeospatialAndAvailabilityTests(TestCase):

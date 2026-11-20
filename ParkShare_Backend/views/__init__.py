@@ -9,6 +9,7 @@ from .admin_auth_views import (
 )
 from .auth_views import LoginView, RegisterView
 from .cochera_views import (
+    AdminGarageListView,
     AdminGarageValidationView,
     GarageDetailUpdateView,
     GarageListCreateView,
@@ -37,5 +38,6 @@ __all__ = [
     'GarageListCreateView',
     'LandlordGarageListView',
     'GarageDetailUpdateView',
+    'AdminGarageListView',
     'AdminGarageValidationView',
 ]

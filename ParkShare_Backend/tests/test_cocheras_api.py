@@ -277,6 +277,65 @@ class CocherasAPITests(APITestCase):
         )
         self.assertEqual(res_not_found.status_code, status.HTTP_404_NOT_FOUND)
 
+    # --- GET /admin/cocheras ---
+
+    def test_admin_list_garages_endpoint_filters_permissions_and_num_queries(self):
+        self._auth_as(self.active_landlord.correo)
+        g_pending_1_id = self.client.post('/cocheras', self._valid_payload(), format='json').data['id_cochera']
+        self._auth_as(self.other_landlord.correo)
+        g_pending_2_id = self.client.post('/cocheras', self._valid_payload(), format='json').data['id_cochera']
+        g_approved = self._create_approved_garage(
+            self.active_landlord, 'Cochera Ya Aprobada', '19.37', '-99.17', '40.00'
+        )
+
+        # Anonymous -> 401
+        self.client.credentials()
+        self.assertEqual(self.client.get('/admin/cocheras').status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # Non-admin -> 403
+        for email in (self.tenant.correo, self.active_landlord.correo):
+            self._auth_as(email)
+            self.assertEqual(self.client.get('/admin/cocheras').status_code, status.HTTP_403_FORBIDDEN)
+
+        # Admin default (PENDIENTE) with constant 4 queries (no N+1)
+        self._auth_as(self.admin.correo)
+        with self.assertNumQueries(4):
+            res_default = self.client.get('/admin/cocheras')
+
+        self.assertEqual(res_default.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_default.data['count'], 2)
+        self.assertEqual(
+            [item['id_cochera'] for item in res_default.data['results']],
+            [g_pending_2_id, g_pending_1_id],
+        )
+        first_item = res_default.data['results'][0]
+        self.assertEqual(first_item['estado_cochera'], GarageStatus.PENDIENTE)
+        self.assertEqual(first_item['arrendador']['correo'], self.other_landlord.correo)
+        self.assertIn('telefono', first_item['arrendador'])
+        self.assertIsNotNone(first_item['foto_principal'])
+        self.assertEqual(len(first_item['fotos']), 2)
+        self.assertEqual(len(first_item['disponibilidades']), 2)
+
+        # Filters estado=APROBADA, estado=TODOS, pagination, /api/v1/ mirror, and invalid estado
+        res_approved = self.client.get('/admin/cocheras?estado=APROBADA')
+        self.assertEqual(res_approved.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [item['id_cochera'] for item in res_approved.data['results']],
+            [g_approved.id_cochera],
+        )
+
+        res_all = self.client.get('/admin/cocheras?estado=TODOS&page_size=2&page=2')
+        self.assertEqual(res_all.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_all.data['count'], 3)
+        self.assertEqual(len(res_all.data['results']), 1)
+
+        res_v1 = self.client.get('/api/v1/admin/cocheras')
+        self.assertEqual(res_v1.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_v1.data['count'], 2)
+
+        res_invalid = self.client.get('/admin/cocheras?estado=INVALIDO')
+        self.assertEqual(res_invalid.status_code, status.HTTP_400_BAD_REQUEST)
+
     # --- GET /cocheras?lat=&lng=&orden= ---
 
     def test_search_nearby_garages_filters_sorting_and_no_n_plus_1(self):

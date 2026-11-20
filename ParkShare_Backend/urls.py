@@ -11,6 +11,7 @@ from .views import (
     AdminAccountDetailView,
     AdminAccountListView,
     AdminAccountSuspendView,
+    AdminGarageListView,
     AdminGarageValidationView,
     AdminLandlordRequestDetailView,
     AdminLandlordRequestListView,
@@ -66,6 +67,11 @@ def get_api_urlpatterns(name_prefix: str = ''):
             r'^cocheras/(?P<pk>\d+)/?$',
             GarageDetailUpdateView.as_view(),
             name=f'{name_prefix}cocheras-detail',
+        ),
+        re_path(
+            r'^admin/cocheras/?$',
+            AdminGarageListView.as_view(),
+            name=f'{name_prefix}admin-cocheras-list',
         ),
         re_path(
             r'^admin/cocheras/(?P<pk>\d+)/validar/?$',

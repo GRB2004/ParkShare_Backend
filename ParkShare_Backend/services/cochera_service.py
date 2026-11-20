@@ -422,6 +422,18 @@ def get_garage_detail_for_user(garage_id: int, user: Usuario) -> Cochera:
     return garage
 
 
+def _filter_queryset_by_status(queryset, status_filter: str | None, default_status: str | None = None):
+    raw_status = (status_filter or '').strip().upper() or default_status
+    if raw_status and raw_status != 'TODOS':
+        if raw_status not in GarageStatus.values:
+            raise DomainValidationError(
+                'El estado de cochera indicado no es válido.',
+                errors={'estado': ['Estado de cochera inválido.']},
+            )
+        return queryset.filter(estado_cochera=raw_status)
+    return queryset
+
+
 def list_landlord_garages(landlord: Usuario, status_filter: str | None = None) -> list[Cochera]:
     """List all garages owned by the authenticated active landlord."""
     _check_active_landlord(landlord)
@@ -431,16 +443,24 @@ def list_landlord_garages(landlord: Usuario, status_filter: str | None = None) -
         .prefetch_related('fotos')
         .order_by('-id_cochera')
     )
+    queryset = _filter_queryset_by_status(queryset, status_filter)
+    return list(queryset)
 
-    cleaned_status = (status_filter or '').strip().upper()
-    if cleaned_status and cleaned_status != 'TODOS':
-        if cleaned_status not in GarageStatus.values:
-            raise DomainValidationError(
-                'El estado de cochera indicado no es válido.',
-                errors={'estado': ['Estado de cochera inválido.']},
-            )
-        queryset = queryset.filter(estado_cochera=cleaned_status)
 
+def list_admin_garages(admin_user: Usuario, status_filter: str | None = None) -> list[Cochera]:
+    """List garages for administrative review defaulting to PENDIENTE (RN-10)."""
+    _check_active_admin(admin_user)
+
+    queryset = (
+        Cochera.objects.select_related('arrendador')
+        .prefetch_related('fotos', 'disponibilidades')
+        .order_by('-id_cochera')
+    )
+    queryset = _filter_queryset_by_status(
+        queryset,
+        status_filter,
+        default_status=GarageStatus.PENDIENTE,
+    )
     return list(queryset)
 
 

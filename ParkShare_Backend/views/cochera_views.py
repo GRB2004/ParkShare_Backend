@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 
 from ParkShare_Backend.permissions import IsActiveAccount, IsActiveLandlord, IsAdminRole
 from ParkShare_Backend.serializers.cochera_serializers import (
+    AdminGarageReviewListSerializer,
     CocheraAdminValidationSerializer,
     CocheraCreateSerializer,
     CocheraDetailSerializer,
@@ -22,6 +23,7 @@ from ParkShare_Backend.services.auth_service import (
 from ParkShare_Backend.services.cochera_service import (
     create_garage,
     get_garage_detail_for_user,
+    list_admin_garages,
     list_landlord_garages,
     search_nearby_garages,
     update_garage,
@@ -119,6 +121,26 @@ class GarageDetailUpdateView(APIView):
             return handle_domain_exception(exc)
 
         return Response(CocheraDetailSerializer(garage).data, status=status.HTTP_200_OK)
+
+
+class AdminGarageListView(APIView):
+    """List garages pending administrative review (`GET /admin/cocheras`)."""
+
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        try:
+            garages = list_admin_garages(
+                request.user,
+                status_filter=request.query_params.get('estado'),
+            )
+        except (DomainValidationError, PermissionDeniedError) as exc:
+            return handle_domain_exception(exc)
+
+        paginator = StandardPagination()
+        page = paginator.paginate_queryset(garages, request, view=self)
+        serializer = AdminGarageReviewListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 
 class AdminGarageValidationView(APIView):

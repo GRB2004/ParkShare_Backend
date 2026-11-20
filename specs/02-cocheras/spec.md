@@ -10,7 +10,7 @@ Este módulo gestiona el ciclo de vida completo de las cocheras en **ParkShare_B
 - Registro atómico de cochera (`cochera`), fotografías (`foto_cochera`) y franjas horarias por día de la semana (`disponibilidad`).
 - Bloqueo de publicación para cuentas que no sean `ARRENDADOR` con `estado_cuenta = 'ACTIVA'` (**RN-08**).
 - Validación de superficie, capacidad, tarifa, coordenadas geográficas y formatos de imagen (**RN-09**).
-- Flujo de aprobación/rechazo de publicaciones por el administrador (**RN-10**).
+- Flujo de consulta, aprobación y rechazo de publicaciones por el administrador (**RN-10**).
 - Búsqueda de cocheras aprobadas cercanas a unas coordenadas (`lat`, `lng`) usando fórmula de Haversine en MySQL, con ordenamiento por `cercania`, `precio` o `disponibilidad` (**CU-04**).
 - Consulta de cocheras propias del arrendador, detalle de cochera y edición parcial (tarifas, horarios, activación/inactivación temporal `APROBADA <-> INACTIVA`).
 
@@ -36,7 +36,7 @@ Este módulo gestiona el ciclo de vida completo de las cocheras en **ParkShare_B
 | :--- | :--- |
 | **RN-08** (Cuenta activa de arrendador) | Únicamente usuarios autenticados con `rol = 'ARRENDADOR'` y `estado_cuenta = 'ACTIVA'` pueden registrar (`POST /cocheras`) o administrar (`GET /cocheras/mis-cocheras`, `PATCH /cocheras/{id}`) cocheras. Arrendadores en estado `PENDIENTE`, `RECHAZADA` o `SUSPENDIDA`, así como `ARRENDATARIO`, reciben `403 Forbidden`. |
 | **RN-09** (Datos de la cochera) | Toda cochera debe incluir al menos **1 fotografía** en formato `JPG`, `PNG` o `WEBP` (`foto_cochera`), especificar su superficie `metros_cuadrados > 0`, especificar `espacios_totales >= 1`, `tarifa_hora > 0` y al menos **1 franja horaria** válida en `disponibilidad` (`CU-03`). |
-| **RN-10** (Validación de la publicación) | Toda cochera recién creada nace en `estado_cochera = 'PENDIENTE'`. Solo un `ADMIN` (`PATCH /admin/cocheras/{id}/validar`) puede cambiarla a `APROBADA` (si cumple condiciones para resguardar vehículos `AUTO`, `MOTO` o `AMBOS`) o `RECHAZADA`. Un arrendador nunca puede autoaprobar su cochera mediante `PATCH /cocheras/{id}`. |
+| **RN-10** (Validación de la publicación) | Toda cochera recién creada nace en `estado_cochera = 'PENDIENTE'`. Solo un `ADMIN` (`GET /admin/cocheras` para consultar la bandeja de revisión y `PATCH /admin/cocheras/{id}/validar` para resolver) puede cambiarla a `APROBADA` (si cumple condiciones para resguardar vehículos `AUTO`, `MOTO` o `AMBOS`) o `RECHAZADA`. Un arrendador nunca puede autoaprobar su cochera mediante `PATCH /cocheras/{id}`. |
 
 ### Reglas de Máquina de Estados de `Cochera`
 - **Estados permitidos**: `PENDIENTE`, `APROBADA`, `RECHAZADA`, `INACTIVA`.
@@ -289,7 +289,58 @@ cochera (1) ──────< (N) disponibilidad
 
 ---
 
-### 5.6 `PATCH /admin/cocheras/{id}/validar`
+### 5.6 `GET /admin/cocheras`
+- **Autenticación y Permisos**: JWT requerido (`IsAuthenticated`, `IsAdminRole`).
+- **Descripción**: Lista las cocheras para revisión administrativa (**RN-10**), ordenadas de más reciente a más antigua (`-id_cochera`).
+- **Query Params**:
+  - `estado` (opcional, default `PENDIENTE`): `PENDIENTE` | `APROBADA` | `RECHAZADA` | `INACTIVA` | `TODOS`.
+  - `page`, `page_size` (paginación estándar).
+
+#### Respuestas
+- **`200 OK`**: Objeto paginado (`count`, `next`, `previous`, `results`):
+```json
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id_cochera": 10,
+      "nombre": "Cochera Los Pinos",
+      "direccion": "Av. Insurgentes Sur 1450, Col. Actipan, C.P. 03230",
+      "latitud": "19.37124500",
+      "longitud": "-99.17834200",
+      "metros_cuadrados": "35.50",
+      "espacios_totales": 2,
+      "tarifa_hora": "45.00",
+      "tipo_vehiculo": "AMBOS",
+      "estado_cochera": "PENDIENTE",
+      "foto_principal": "https://storage.parkshare.mx/cocheras/pinos_1.jpg",
+      "arrendador": {
+        "id_usuario": 2,
+        "nombre_completo": "Carlos Eduardo Ramírez Pérez",
+        "correo": "carlos.ramirez@gmail.com",
+        "telefono": "5598765432"
+      },
+      "fotos": [
+        { "id_foto": 1, "url_foto": "https://storage.parkshare.mx/cocheras/pinos_1.jpg" },
+        { "id_foto": 2, "url_foto": "https://storage.parkshare.mx/cocheras/pinos_2.webp" }
+      ],
+      "disponibilidades": [
+        { "id_disponibilidad": 1, "dia_semana": "L", "hora_inicio": "07:00:00", "hora_fin": "22:00:00" },
+        { "id_disponibilidad": 2, "dia_semana": "M", "hora_inicio": "07:00:00", "hora_fin": "22:00:00" }
+      ]
+    }
+  ]
+}
+```
+- **`400 Bad Request`**: Parámetro `estado` inválido.
+- **`401 Unauthorized`**: Sin token válido.
+- **`403 Forbidden`**: Usuario con rol distinto de `ADMIN`.
+
+---
+
+### 5.7 `PATCH /admin/cocheras/{id}/validar`
 - **Autenticación y Permisos**: JWT requerido (`IsAuthenticated`, `IsAdminRole`).
 - **Descripción**: El administrador aprueba (`APROBADA`) o rechaza (`RECHAZADA`) una cochera en revisión (`PENDIENTE`) conforme a **RN-10**.
 
@@ -328,6 +379,8 @@ cochera (1) ──────< (N) disponibilidad
 5. **Listado propio del arrendador**: `GET /cocheras/mis-cocheras` devuelve todas sus cocheras (`PENDIENTE`, `APROBADA`, `INACTIVA`, `RECHAZADA`) y oculta las de otros arrendadores.
 6. **Pausa y reactivación temporal por propietario**: Arrendador dueño cambia su cochera `APROBADA -> INACTIVA` y luego `INACTIVA -> APROBADA` mediante `PATCH /cocheras/{id}` (`200 OK`).
 7. **Actualización de tarifa y horario (`CU-03`)**: Arrendador actualiza `tarifa_hora` y reemplaza franjas en `disponibilidades` (`200 OK`).
+8. **Listado administrativo de cocheras (`GET /admin/cocheras`, `RN-10`)**: `ADMIN` consulta `GET /admin/cocheras` y recibe por defecto solo las cocheras `PENDIENTE` ordenadas por `-id_cochera`, paginadas (`count`, `next`, `previous`, `results`), con datos de `arrendador` (`id_usuario`, `nombre_completo`, `correo`, `telefono`), `foto_principal`, `fotos` y `disponibilidades`.
+9. **Filtros administrativos en `GET /admin/cocheras`**: Con `?estado=APROBADA` devuelve solo cocheras aprobadas; con `?estado=TODOS` devuelve cocheras en cualquier estado (`PENDIENTE`, `APROBADA`, `RECHAZADA`, `INACTIVA`).
 
 ### 6.2 Casos de Error y Validación
 1. **Bloqueo por `RN-08`**: `ARRENDADOR` en estado `PENDIENTE` o `RECHAZADA`, o usuario con rol `ARRENDATARIO`, intenta `POST /cocheras` -> `403 Forbidden`.
@@ -345,6 +398,10 @@ cochera (1) ──────< (N) disponibilidad
 5. **Seguridad de propiedad**: Arrendador B intenta `PATCH /cocheras/{id}` de una cochera de Arrendador A -> `403 Forbidden`.
 6. **Intento de auto-aprobación (`RN-10`)**: Arrendador intenta `PATCH /cocheras/{id}` con `estado_cochera: "APROBADA"` cuando la cochera está `PENDIENTE` o `RECHAZADA` -> `403 Forbidden` / `409 Conflict`.
 7. **Acceso no-admin a validación**: Arrendador o Arrendatario intenta `PATCH /admin/cocheras/{id}/validar` -> `403 Forbidden`.
+8. **Validaciones y seguridad en `GET /admin/cocheras`**:
+   - Parámetro `estado` inválido (ej. `?estado=BORRADA`) -> `400 Bad Request`.
+   - Petición sin token válido -> `401 Unauthorized`.
+   - Petición con usuario cuyo rol es `ARRENDADOR` o `ARRENDATARIO` -> `403 Forbidden`.
 
 ### 6.3 Casos Límite (Edge Cases)
 1. **Fuerza de estado inicial `PENDIENTE`**: Si el arrendador envía `"estado_cochera": "APROBADA"` en el payload de `POST /cocheras`, el sistema lo ignora o rechaza y la cochera nunca nace `APROBADA`.
@@ -353,4 +410,5 @@ cochera (1) ──────< (N) disponibilidad
 4. **Visibilidad de cochera no aprobada en `GET /cocheras/{id}`**: Arrendatario solicitando detalle de una cochera `PENDIENTE` o `INACTIVA` recibe `404 Not Found`; su dueño o el `ADMIN` reciben `200 OK`.
 5. **Doble validación administrativa**: Intentar validar una cochera que ya está `APROBADA` o `RECHAZADA` devuelve `409 Conflict`.
 6. **Filtro de `tipo_vehiculo`**: Buscar con `?tipo_vehiculo=MOTO` devuelve cocheras `MOTO` y `AMBOS`, excluyendo `AUTO`.
-7. **Optimización ORM**: `GET /cocheras` y `GET /cocheras/{id}` usan `select_related('arrendador')` y `prefetch_related('fotos', 'disponibilidades')` manteniendo número constante de queries (`assertNumQueries`).
+7. **Optimización ORM**: `GET /cocheras`, `GET /cocheras/{id}` y `GET /admin/cocheras` usan `select_related('arrendador')` y `prefetch_related('fotos', 'disponibilidades')` manteniendo número constante de queries (`assertNumQueries`, sin consultas N+1).
+8. **Paginación en `GET /admin/cocheras`**: Soporta `?page=` y `?page_size=` devolviendo los metadatos `count`, `next`, `previous` y `results` ordenados por `-id_cochera`.

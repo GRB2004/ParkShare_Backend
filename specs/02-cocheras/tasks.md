@@ -66,6 +66,17 @@
   - Registrar rutas en `urls.py` y modelos en `admin.py`.
   - Ejecutar `python manage.py test` y confirmar 100% de tests en verde.
 
+- [x] **02.3.3 (Rojo) Escribir tests unitarios y de integración para `GET /admin/cocheras`**
+  - Ampliar `ParkShare_Backend/tests/test_cocheras_services.py` con tests unitarios para `list_admin_garages` (default `PENDIENTE`, filtro `APROBADA`/`RECHAZADA`/`INACTIVA`/`TODOS`, ordenamiento `-id_cochera`, error en estado inválido y validación de rol `ADMIN`).
+  - Ampliar `ParkShare_Backend/tests/test_cocheras_api.py` con tests de integración para `GET /admin/cocheras` cubriendo permisos (`401` sin token, `403` no-admin), filtros `estado`, paginación (`count`, `next`, `previous`, `results`), estructura completa de respuesta (`arrendador`, `foto_principal`, `fotos`, `disponibilidades`) y `assertNumQueries` sin N+1.
+  - Ejecutar `python manage.py test` y comprobar fallo inicial (fase **Roja**).
+
+- [x] **02.3.4 (Verde + Refactor) Implementar listado administrativo `GET /admin/cocheras`**
+  - Implementar `list_admin_garages` en `services/cochera_service.py` con `select_related('arrendador')`, `prefetch_related('fotos', 'disponibilidades')` y ordenamiento `-id_cochera`.
+  - Implementar `AdminGarageLandlordSerializer` y `AdminGarageReviewListSerializer` en `serializers/cochera_serializers.py`.
+  - Implementar `AdminGarageListView` en `views/cochera_views.py` con paginación `StandardPagination` y registrar ruta `admin/cocheras` en `urls.py` (con espejo `/api/v1/`).
+  - Ejecutar `python manage.py test` y confirmar 100% de tests en verde.
+
 ---
 
 ## Fase 4: Verificación Final y Auditoría

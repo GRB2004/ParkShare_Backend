@@ -6,7 +6,7 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - Roles de agentes definidos en `agents/` (`coordinator.md`, `planner.md`, `implementer.md`, `reviewer.md`).
 - Diseñadas las 6 specs modulares y planes TDD (`spec.md` y `tasks.md`) en `specs/` (`01-auth` a `06-quejas-sanciones-resenas`).
 - **Módulo `01-auth` implementado, probado y APROBADO por `Reviewer`** (35/35 tests en verde).
-- **Módulo `02-cocheras` implementado, probado y APROBADO por `Reviewer`** (24 tests nuevos; 59/59 tests totales en verde, sin migraciones pendientes).
+- **Módulo `02-cocheras` implementado, probado y APROBADO por `Reviewer`** (26 tests; 61/61 tests totales en verde incluyendo `GET /admin/cocheras`, sin migraciones pendientes).
 
 ## Decisiones (y por qué)
 - **Alineación con la Constitución**: Lógica de negocio en backend Django/DRF, código en inglés, mensajes/documentación en español, TDD obligatorio.
