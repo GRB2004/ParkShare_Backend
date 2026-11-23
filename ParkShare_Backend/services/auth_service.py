@@ -25,10 +25,11 @@ REJECTION_REASON_CATALOG = (
 class DomainValidationError(Exception):
     """Domain validation error mapping to HTTP 400 Bad Request."""
 
-    def __init__(self, detail: str, errors: dict | None = None):
+    def __init__(self, detail: str, errors: dict | None = None, error_code: str | None = None):
         super().__init__(detail)
         self.detail = detail
         self.errors = errors or {}
+        self.error_code = error_code
 
 
 class AuthenticationError(Exception):
@@ -50,25 +51,37 @@ class AccountSuspendedError(Exception):
 class NotFoundError(Exception):
     """Missing resource error mapping to HTTP 404 Not Found."""
 
-    def __init__(self, detail: str):
+    def __init__(self, detail: str, error_code: str | None = None):
         super().__init__(detail)
         self.detail = detail
+        self.error_code = error_code
 
 
 class ConflictError(Exception):
     """State conflict error mapping to HTTP 409 Conflict."""
 
-    def __init__(self, detail: str):
+    def __init__(self, detail: str, error_code: str | None = None):
         super().__init__(detail)
         self.detail = detail
+        self.error_code = error_code
 
 
 class PermissionDeniedError(Exception):
     """Role or ownership permission error mapping to HTTP 403 Forbidden."""
 
-    def __init__(self, detail: str):
+    def __init__(self, detail: str, error_code: str | None = None):
         super().__init__(detail)
         self.detail = detail
+        self.error_code = error_code
+
+
+class GoneError(Exception):
+    """Expired resource error mapping to HTTP 410 Gone."""
+
+    def __init__(self, detail: str, error_code: str = 'QRExpired'):
+        super().__init__(detail)
+        self.detail = detail
+        self.error_code = error_code
 
 
 def _validation_error_to_dict(exc: DjangoValidationError) -> dict:

@@ -9,7 +9,7 @@
 
 ## Prerrequisitos de Arquitectura y Dependencias
 
-- [ ] **TASK-04-00: Verificar prerrequisitos de módulos base y DRF**
+- [x] **TASK-04-00: Verificar prerrequisitos de módulos base y DRF**
   - Confirmar existencia de modelos `Usuario` (con `placas`, `modelo_vehiculo`, `estado_cuenta`), `Cochera` y `Reserva` (`fecha_hora_inicio`, `fecha_hora_fin`) y sus servicios `start_reservation_usage` / `finish_reservation` de los Módulos `01-auth`, `02-cocheras` y `03-reservas`.
   - Confirmar si `djangorestframework` ya se encuentra autorizado en `requirements.txt` (en caso contrario, **detenerse y solicitar autorización al usuario** explicando su necesidad para endpoints REST, conforme a `AGENTS.md`).
   - Confirmar estructura de URLs y autenticación activa en `ParkShare_Backend`.
@@ -18,7 +18,7 @@
 
 ## Fase 1: Modelo `CodigoQR` y Migraciones (Rojo -> Verde)
 
-- [ ] **TASK-04-01 [ROJO]: Escribir tests de modelo y restricciones para `CodigoQR`**
+- [x] **TASK-04-01 [ROJO]: Escribir tests de modelo y restricciones para `CodigoQR`**
   - Crear `ParkShare_Backend/tests/test_qr_models.py` (o en el paquete de pruebas correspondiente).
   - Cubrir los siguientes casos de prueba que deben **fallar inicialmente**:
     1. Creación válida de `CodigoQR` vinculado a una `Reserva` con `token_qr` SHA-256 (64 hex chars), `tipo_qr='ENTRADA'` y default `usado=False`.
@@ -28,7 +28,7 @@
     5. Validación de formato SHA-256 en `token_qr` (longitud != 64 o caracteres no hexadecimales) y validación `expiracion > fecha_emision` en `clean()`.
   - Ejecutar `python manage.py test` y verificar el fallo esperado (Fase Roja).
 
-- [ ] **TASK-04-02 [VERDE]: Implementar modelo `CodigoQR` y generar migración**
+- [x] **TASK-04-02 [VERDE]: Implementar modelo `CodigoQR` y generar migración**
   - Definir el modelo `CodigoQR` en `ParkShare_Backend/models/` con `Meta.db_table = 'codigo_qr'` y columnas exactas del Diccionario de Datos (`id_qr`, `reserva`, `token_qr`, `tipo_qr`, `usado`, `fecha_emision`, `expiracion`).
   - Declarar `UniqueConstraint` en `('reserva', 'tipo_qr')`, índices en `token_qr` y `('reserva', 'tipo_qr', 'usado')`, y validaciones en `clean()`.
   - Ejecutar `python manage.py makemigrations` y `python manage.py migrate`.
@@ -38,7 +38,7 @@
 
 ## Fase 2: Servicios de Generación, Validación y Cálculo de Retraso (`RN-02`, `RN-03`, `RN-06`)
 
-- [ ] **TASK-04-03 [ROJO]: Escribir tests unitarios de servicios de QR y reglas de negocio**
+- [x] **TASK-04-03 [ROJO]: Escribir tests unitarios de servicios de QR y reglas de negocio**
   - Crear `ParkShare_Backend/tests/test_qr_services.py` probando el módulo de servicio (antes de implementarlo):
     1. `issue_entry_qr(reserva)`: genera token SHA-256 único de 64 hex chars con entropía CSPRNG, `expiracion = reserva.fecha_hora_fin`, solo si `reserva.estado == 'CONFIRMADA'`; rechaza si la reserva está `SOLICITADA`, `CANCELADA`, `EXPIRADA` o `FINALIZADA`.
     2. `issue_entry_qr(reserva)` es idempotente si ya existe un QR de `ENTRADA` no usado, evitando duplicados.
@@ -53,7 +53,7 @@
        - Rechazos: token no existente, `usado=True`, `now > expiracion`, reserva `CANCELADA` / `EXPIRADA`, llegada `> 15 min` antes de `fecha_hora_inicio`, y arrendador no propietario de la cochera.
   - Ejecutar `python manage.py test` y verificar el fallo esperado (Fase Roja).
 
-- [ ] **TASK-04-04 [VERDE + REFACTOR]: Implementar servicios criptográficos y transaccionales de QR**
+- [x] **TASK-04-04 [VERDE + REFACTOR]: Implementar servicios criptográficos y transaccionales de QR**
   - Implementar en `ParkShare_Backend/services/qr_service.py` (y adaptador de reloj/token si aplica en `ParkShare_Backend/puentes/`):
     - Generación segura con `secrets.token_bytes(32)` + `hashlib.sha256(...).hexdigest()`.
     - Función pura `calculate_late_checkout_penalty(scheduled_end, actual_exit)`.
@@ -65,7 +65,7 @@
 
 ## Fase 3: Serializadores y Endpoints REST (`GET /reservas/{id}/qr`, `POST /reservas/validar`)
 
-- [ ] **TASK-04-05 [ROJO]: Escribir tests de integración API (`APITestCase`) para endpoints QR**
+- [x] **TASK-04-05 [ROJO]: Escribir tests de integración API (`APITestCase`) para endpoints QR**
   - Crear `ParkShare_Backend/tests/test_qr_api.py` cubriendo:
     1. `GET /reservas/{id}/qr`:
        - `200 OK` devolviendo QR `ENTRADA` cuando reserva está `CONFIRMADA` y usuario es el `ARRENDATARIO` dueño.
@@ -84,7 +84,7 @@
        - `410 Gone` por QR expirado.
   - Ejecutar `python manage.py test` y verificar fallo inicial (Fase Roja).
 
-- [ ] **TASK-04-06 [VERDE + REFACTOR]: Implementar serializadores, permisos, vistas y rutas URL**
+- [x] **TASK-04-06 [VERDE + REFACTOR]: Implementar serializadores, permisos, vistas y rutas URL**
   - Crear serializadores DRF (`CodigoQRSerializer`, `ValidateQRInputSerializer`, `QRValidationResponseSerializer`) en `ParkShare_Backend/serializers/qr_serializers.py`.
   - Crear clases de permisos específicas (`IsRenterOwner`, `IsActiveVerifiedHost`) en `ParkShare_Backend/permissions.py` (o módulo de permisos compartido).
   - Implementar vistas (`ReservaQRDetailView`, `ValidateQRView`) en `ParkShare_Backend/views/qr_views.py` con mensajes de error claros en español y código en inglés.
@@ -95,12 +95,12 @@
 
 ## Fase 4: Verificación Final y Auditoría por el `Reviewer`
 
-- [ ] **TASK-04-07 [REVISIÓN]: Auditoría integral y suite completa de pruebas**
+- [x] **TASK-04-07 [REVISIÓN]: Auditoría integral y suite completa de pruebas**
   - Ejecutar `python manage.py check` y `python manage.py makemigrations --check --dry-run`.
   - Ejecutar `python manage.py test` completo y certificar **0 errores y 0 fallos**.
   - Verificar checklist de auditoría para el **Reviewer**:
-    - [ ] Coincidencia exacta de tabla `codigo_qr` con el Diccionario de Datos.
-    - [ ] Reglas `RN-02`, `RN-03` y `RN-06` cubiertas con pruebas de frontera exacta (10 min 00 s vs 10 min 01 s vs 20 min 00 s).
-    - [ ] Tokens generados criptográficamente (SHA-256) y bloqueo transaccional contra doble escaneo.
-    - [ ] No exposición del token de `SALIDA` al arrendador en `POST /reservas/validar`.
-    - [ ] Consultas ORM optimizadas (`select_related`), código en inglés y mensajes en español.
+    - [x] Coincidencia exacta de tabla `codigo_qr` con el Diccionario de Datos.
+    - [x] Reglas `RN-02`, `RN-03` y `RN-06` cubiertas con pruebas de frontera exacta (10 min 00 s vs 10 min 01 s vs 20 min 00 s).
+    - [x] Tokens generados criptográficamente (SHA-256) y bloqueo transaccional contra doble escaneo.
+    - [x] No exposición del token de `SALIDA` al arrendador en `POST /reservas/validar`.
+    - [x] Consultas ORM optimizadas (`select_related`), código en inglés y mensajes en español.

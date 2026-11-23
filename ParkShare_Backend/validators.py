@@ -9,6 +9,7 @@ from django.utils import timezone
 
 ALPHABETIC_NAME_REGEX = re.compile(r'^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]+$')
 PHONE_REGEX = re.compile(r'^(?:\d{10}|\+[1-9]\d{9,14})$')
+SHA256_HEX_REGEX = re.compile(r'^[0-9a-fA-F]{64}$')
 
 INE_ALLOWED_EXTENSIONS = ('.pdf', '.jpg', '.jpeg', '.png')
 PDF_ONLY_EXTENSIONS = ('.pdf',)
@@ -71,4 +72,11 @@ def validate_pdf_extension(value: str) -> None:
 def validate_garage_photo_extension(value: str) -> None:
     """Valida extensión de imagen permitida para fotografías de cochera (.jpg, .jpeg, .png, .webp)."""
     validate_file_extension(value, GARAGE_PHOTO_ALLOWED_EXTENSIONS)
+
+
+def validate_sha256_hex_token(value: str) -> None:
+    """Valida que el token QR sea una cadena hexadecimal SHA-256 exacta de 64 caracteres."""
+    cleaned = (value or '').strip() if isinstance(value, str) else ''
+    if not SHA256_HEX_REGEX.match(cleaned):
+        raise ValidationError('El token QR debe ser una cadena hexadecimal válida de 64 caracteres.')
 

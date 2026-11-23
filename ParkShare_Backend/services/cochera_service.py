@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import F, FloatField, Value
-from django.db.models.functions import ACos, Cast, Cos, Greatest, Least, Radians, Sin
+from django.db.models import Count, F, FloatField, IntegerField, OuterRef, Subquery, Value
+from django.db.models.functions import ACos, Cast, Coalesce, Cos, Greatest, Least, Radians, Sin
 from django.utils import timezone
 
 from ParkShare_Backend.models import (
@@ -15,6 +15,8 @@ from ParkShare_Backend.models import (
     Disponibilidad,
     FotoCochera,
     GarageStatus,
+    Reserva,
+    ReservationStatus,
     UserRole,
     Usuario,
     VehicleType,
@@ -42,6 +44,11 @@ WEEKDAY_CODES = (
 VALID_ORDER_OPTIONS = ('cercania', 'precio', 'disponibilidad')
 EARTH_RADIUS_KM = 6371.0
 UPDATABLE_GARAGE_FIELDS = ('nombre', 'tarifa_hora', 'espacios_totales', 'tipo_vehiculo')
+ACTIVE_RESERVATION_STATUSES = (
+    ReservationStatus.SOLICITADA,
+    ReservationStatus.CONFIRMADA,
+    ReservationStatus.EN_USO,
+)
 
 
 def _check_active_landlord(user: Usuario) -> None:
@@ -186,8 +193,18 @@ def validate_availability_slots(slots) -> list[dict]:
 
 
 def get_active_reservations_count(garage: Cochera, reference_dt: datetime | None = None) -> int:
-    """Decoupled integration hook for Module 03 (`reserva`) active space occupancy."""
-    return 0
+    """Count active overlapping reservations occupying garage spaces (Module 03)."""
+    check_dt = reference_dt or timezone.now()
+    annotated_count = getattr(garage, '_active_reservations_now', None)
+    annotated_ref = getattr(garage, '_active_reservations_ref_dt', None)
+    if annotated_count is not None and (reference_dt is None or annotated_ref == check_dt):
+        return int(annotated_count)
+    return Reserva.objects.filter(
+        cochera=garage,
+        estado__in=ACTIVE_RESERVATION_STATUSES,
+        fecha_hora_inicio__lte=check_dt,
+        fecha_hora_fin__gt=check_dt,
+    ).count()
 
 
 def get_garage_rating_summary(garage: Cochera) -> dict:
@@ -533,11 +550,31 @@ def search_nearby_garages(
     if radius_km is not None and radius_km != '':
         radius_float = _parse_float_param(radius_km, 'radio_km', 0.000001, 40075.0, required=False)
 
+    reference_dt = current_dt or timezone.now()
+    active_reservations_subquery = (
+        Reserva.objects.filter(
+            cochera_id=OuterRef('pk'),
+            estado__in=ACTIVE_RESERVATION_STATUSES,
+            fecha_hora_inicio__lte=reference_dt,
+            fecha_hora_fin__gt=reference_dt,
+        )
+        .order_by()
+        .values('cochera_id')
+        .annotate(active_count=Count('id_reserva'))
+        .values('active_count')[:1]
+    )
+
     queryset = (
         Cochera.objects.filter(estado_cochera=GarageStatus.APROBADA)
         .select_related('arrendador')
         .prefetch_related('fotos', 'disponibilidades')
-        .annotate(distancia_km=_build_haversine_distance_expression(lat_float, lng_float))
+        .annotate(
+            distancia_km=_build_haversine_distance_expression(lat_float, lng_float),
+            _active_reservations_now=Coalesce(
+                Subquery(active_reservations_subquery, output_field=IntegerField()),
+                Value(0),
+            ),
+        )
     )
 
     if vehicle_type is not None and str(vehicle_type).strip() != '':
@@ -556,11 +593,11 @@ def search_nearby_garages(
         queryset = queryset.filter(distancia_km__lte=radius_float)
 
     garages = list(queryset)
-    reference_dt = current_dt or timezone.now()
 
     for garage in garages:
         raw_dist = float(garage.distancia_km or 0.0)
         garage._raw_distance_km = raw_dist
+        garage._active_reservations_ref_dt = reference_dt
         garage.distancia_km = round(raw_dist, 2)
         is_open, available_spaces = evaluate_garage_realtime_availability(garage, reference_dt)
         garage.abierta_ahora = is_open

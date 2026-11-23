@@ -15,6 +15,12 @@ from .cochera_views import (
     GarageListCreateView,
     LandlordGarageListView,
 )
+from .qr_views import ReservationQRDetailView, ValidateQRView
+from .reserva_views import (
+    ReservationCancelView,
+    ReservationDetailUpdateView,
+    ReservationListCreateView,
+)
 
 
 def home_view(request):
@@ -40,4 +46,9 @@ __all__ = [
     'GarageDetailUpdateView',
     'AdminGarageListView',
     'AdminGarageValidationView',
+    'ReservationListCreateView',
+    'ReservationDetailUpdateView',
+    'ReservationCancelView',
+    'ReservationQRDetailView',
+    'ValidateQRView',
 ]

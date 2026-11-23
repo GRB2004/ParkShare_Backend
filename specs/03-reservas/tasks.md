@@ -6,21 +6,21 @@
 
 ## Prerrequisitos y Autorizaciones (`AGENTS.md`)
 
-- [ ] **03.0.1 Confirmar autorización de archivos nuevos del módulo**
+- [x] **03.0.1 Confirmar autorización de archivos nuevos del módulo**
   - Confirmar creación de archivos de serializadores, servicios de reserva/penalizaciones, vistas y pruebas dentro de `ParkShare_Backend/` (sin nuevas dependencias externas; `math`, `decimal` y `django.utils.timezone` son estándar).
 
 ---
 
 ## Fase 1: Modelo `Reserva` y Migraciones (TDD: Rojo -> Verde)
 
-- [ ] **03.1.1 (Rojo) Escribir tests del modelo `Reserva` y restricciones**
+- [x] **03.1.1 (Rojo) Escribir tests del modelo `Reserva` y restricciones**
   - Crear `ParkShare_Backend/tests/test_reservas_models.py` verificando:
     - Valores por defecto (`estado='SOLICITADA'`, `monto_penalizacion=Decimal('0.00')`, `hora_salida_real=None`, `fecha_creacion` automática).
     - Claves foráneas `arrendatario -> Usuario` y `cochera -> Cochera`.
     - Precisión decimal (`DECIMAL(8, 2)`) en `monto_base` y `monto_penalizacion`, y catálogo completo de `ENUM` de `estado`.
   - Ejecutar `python manage.py test` y comprobar fallo inicial (fase **Roja**).
 
-- [ ] **03.1.2 (Verde) Implementar modelo `Reserva` e índices compuestos y migrar**
+- [x] **03.1.2 (Verde) Implementar modelo `Reserva` e índices compuestos y migrar**
   - Implementar `Reserva` (`db_table='reserva'`) en `models` respetando exactamente columnas, tipos, nulidades e índices compuestos definidos en `spec.md`.
   - Generar migración `makemigrations` y aplicar `migrate`.
   - Ejecutar `test_reservas_models.py` y confirmar paso al 100% (fase **Verde**).
@@ -29,7 +29,7 @@
 
 ## Fase 2: Lógica de Negocio, Máquina de Estados y Reglas `RN-01` a `RN-05` (TDD: Rojo -> Verde)
 
-- [ ] **03.2.1 (Rojo) Escribir tests unitarios de servicios de reserva y penalizaciones**
+- [x] **03.2.1 (Rojo) Escribir tests unitarios de servicios de reserva y penalizaciones**
   - Crear `ParkShare_Backend/tests/test_reservas_services.py` cubriendo:
     - Validación `RN-01`: 30 min, 90 min, 24 h pasan; 15 min, 45 min, 24 h 30 min, `fin <= inicio` fallan.
     - Validación contra `Disponibilidad` (mismo día y cruce de medianoche; fallo si está fuera de horario).
@@ -40,7 +40,7 @@
     - Actualización del cálculo de `espacios_disponibles_ahora` en el servicio de `02-cocheras` considerando reservas activas vigentes.
   - Verificar fallo inicial (fase **Roja**).
 
-- [ ] **03.2.2 (Verde + Refactor) Implementar `services/reserva_service.py` y conector de ocupación en `02-cocheras`**
+- [x] **03.2.2 (Verde + Refactor) Implementar `services/reserva_service.py` y conector de ocupación en `02-cocheras`**
   - Implementar funciones puras de cálculo (`validate_reservation_duration`, `calculate_base_amount`, `calculate_late_surcharge`, `calculate_cancellation_penalty`) y funciones transaccionales (`create_reservation` con `transaction.atomic()` + `select_for_update()`, `transition_reservation_state`, `cancel_reservation`, `finish_reservation`).
   - Conectar el conteo de reservas activas (`SOLICITADA`, `CONFIRMADA`, `EN_USO`) en el helper de disponibilidad de `cochera_service.py` (Módulo `02-cocheras`).
   - Ejecutar `test_reservas_services.py` y la suite previa de `02-cocheras` confirmando 100% en verde (fase **Verde**), refactorizando duplicaciones.
@@ -49,7 +49,7 @@
 
 ## Fase 3: Serializadores y Endpoints REST (TDD: Rojo -> Verde -> Refactor)
 
-- [ ] **03.3.1 (Rojo) Escribir tests de integración API (`APITestCase`) para endpoints de reservas**
+- [x] **03.3.1 (Rojo) Escribir tests de integración API (`APITestCase`) para endpoints de reservas**
   - Crear `ParkShare_Backend/tests/test_reservas_api.py` cubriendo:
     - `POST /reservas`: happy path `201`, cochera `PENDIENTE`/`INACTIVA` -> `409`, cupo saturado -> `409`, `RN-01` inválido -> `400`, fuera de horario -> `400`, auto-reserva -> `400`/`403`, arrendador intentando reservar -> `403`.
     - `GET /reservas`: vistas `proximas`/`anteriores` para `ARRENDATARIO` y `proximas_llegadas`/`en_uso`/`historial` para `ARRENDADOR`, aislamiento entre usuarios y verificación sin N+1 (`assertNumQueries`).
@@ -59,7 +59,7 @@
     - Test de concurrencia controlada simulando reserva simultánea del último cajón (`select_for_update`).
   - Verificar fallo inicial (fase **Roja**).
 
-- [ ] **03.3.2 (Verde + Refactor) Implementar serializadores, vistas y rutas de reservas**
+- [x] **03.3.2 (Verde + Refactor) Implementar serializadores, vistas y rutas de reservas**
   - Implementar serializadores (`ReservaCreateSerializer`, `ReservaListSerializer`, `ReservaDetailSerializer`, `ReservaEstadoUpdateSerializer`) y vistas DRF con `select_related('cochera', 'arrendatario')`.
   - Registrar rutas en `urls.py` y `Reserva` en `admin.py`.
   - Ejecutar `python manage.py test` y verificar 100% de tests en verde.
@@ -68,7 +68,7 @@
 
 ## Fase 4: Verificación Final y Auditoría
 
-- [ ] **03.4.1 Verificación completa de la suite y auditoría por `Reviewer`**
+- [x] **03.4.1 Verificación completa de la suite y auditoría por `Reviewer`**
   - Ejecutar la suite integral completa (`python manage.py test`) para los módulos `01-auth`, `02-cocheras` y `03-reservas` y validar `python manage.py makemigrations --check --dry-run`.
   - Entregar al **Reviewer** para auditar:
     - Cumplimiento exacto de `RN-01` a `RN-05` y trazabilidad con `RN-06`.

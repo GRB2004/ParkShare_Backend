@@ -20,6 +20,11 @@ from .views import (
     LandlordGarageListView,
     LoginView,
     RegisterView,
+    ReservationCancelView,
+    ReservationDetailUpdateView,
+    ReservationListCreateView,
+    ReservationQRDetailView,
+    ValidateQRView,
     home_view,
 )
 
@@ -77,6 +82,31 @@ def get_api_urlpatterns(name_prefix: str = ''):
             r'^admin/cocheras/(?P<pk>\d+)/validar/?$',
             AdminGarageValidationView.as_view(),
             name=f'{name_prefix}admin-cocheras-validar',
+        ),
+        re_path(
+            r'^reservas/?$',
+            ReservationListCreateView.as_view(),
+            name=f'{name_prefix}reservas-list-create',
+        ),
+        re_path(
+            r'^reservas/(?P<pk>\d+)/?$',
+            ReservationDetailUpdateView.as_view(),
+            name=f'{name_prefix}reservas-detail',
+        ),
+        re_path(
+            r'^reservas/(?P<pk>\d+)/cancelar/?$',
+            ReservationCancelView.as_view(),
+            name=f'{name_prefix}reservas-cancel',
+        ),
+        re_path(
+            r'^reservas/(?P<pk>\d+)/qr/?$',
+            ReservationQRDetailView.as_view(),
+            name=f'{name_prefix}reservas-qr-detail',
+        ),
+        re_path(
+            r'^reservas/validar/?$',
+            ValidateQRView.as_view(),
+            name=f'{name_prefix}reservas-validate-qr',
         ),
     ]
 

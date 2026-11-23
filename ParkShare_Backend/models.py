@@ -5,6 +5,7 @@ from django.contrib.auth.models import PermissionsMixin
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 from .validators import (
     validate_adult_birth_date,
@@ -14,6 +15,7 @@ from .validators import (
     validate_landlord_gmail,
     validate_pdf_extension,
     validate_phone_number,
+    validate_sha256_hex_token,
 )
 
 
@@ -62,6 +64,20 @@ class WeekdayChoice(models.TextChoices):
     V = 'V', 'Viernes'
     S = 'S', 'Sábado'
     D = 'D', 'Domingo'
+
+
+class ReservationStatus(models.TextChoices):
+    SOLICITADA = 'SOLICITADA', 'Solicitada'
+    CONFIRMADA = 'CONFIRMADA', 'Confirmada'
+    EN_USO = 'EN_USO', 'En uso'
+    FINALIZADA = 'FINALIZADA', 'Finalizada'
+    CANCELADA = 'CANCELADA', 'Cancelada'
+    EXPIRADA = 'EXPIRADA', 'Expirada'
+
+
+class QRCodeType(models.TextChoices):
+    ENTRADA = 'ENTRADA', 'Entrada'
+    SALIDA = 'SALIDA', 'Salida'
 
 
 class UsuarioManager(BaseUserManager):
@@ -486,3 +502,145 @@ class Disponibilidad(models.Model):
             raise ValidationError({
                 'hora_fin': ['La hora de cierre debe ser posterior a la hora de apertura.'],
             })
+
+
+class Reserva(models.Model):
+    """Parking reservation lifecycle, state machine, and penalty tracking (CU-05 / RN-01..RN-05)."""
+
+    id_reserva = models.BigAutoField(primary_key=True, db_column='id_reserva')
+    arrendatario = models.ForeignKey(
+        Usuario,
+        on_delete=models.RESTRICT,
+        related_name='reservations',
+        db_column='arrendatario_id',
+    )
+    cochera = models.ForeignKey(
+        Cochera,
+        on_delete=models.RESTRICT,
+        related_name='reservations',
+        db_column='cochera_id',
+    )
+    fecha_hora_inicio = models.DateTimeField(db_column='fecha_hora_inicio')
+    fecha_hora_fin = models.DateTimeField(db_column='fecha_hora_fin')
+    hora_salida_real = models.DateTimeField(
+        null=True,
+        blank=True,
+        default=None,
+        db_column='hora_salida_real',
+    )
+    monto_base = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        db_column='monto_base',
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    monto_penalizacion = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        db_column='monto_penalizacion',
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    estado = models.CharField(
+        max_length=15,
+        choices=ReservationStatus.choices,
+        default=ReservationStatus.SOLICITADA,
+        db_column='estado',
+        db_index=True,
+    )
+    fecha_creacion = models.DateTimeField(auto_now_add=True, db_column='fecha_creacion')
+
+    class Meta:
+        db_table = 'reserva'
+        indexes = [
+            models.Index(
+                fields=['cochera', 'estado', 'fecha_hora_inicio', 'fecha_hora_fin'],
+                name='idx_reserva_cupo',
+            ),
+            models.Index(
+                fields=['arrendatario', 'estado', 'fecha_hora_inicio'],
+                name='idx_reserva_arrendatario',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Reservation #{self.id_reserva} - garage {self.cochera_id} ({self.estado})'
+
+    @property
+    def monto_total(self) -> Decimal:
+        base = self.monto_base if self.monto_base is not None else Decimal('0.00')
+        penalty = self.monto_penalizacion if self.monto_penalizacion is not None else Decimal('0.00')
+        return base + penalty
+
+    def clean(self) -> None:
+        super().clean()
+        if (
+            self.fecha_hora_inicio is not None
+            and self.fecha_hora_fin is not None
+            and self.fecha_hora_fin <= self.fecha_hora_inicio
+        ):
+            raise ValidationError({
+                'fecha_hora_fin': ['La fecha y hora de fin debe ser posterior a la fecha y hora de inicio.'],
+            })
+
+
+class CodigoQR(models.Model):
+    """Single-use cryptographic SHA-256 access/checkout QR token linked to a reservation."""
+
+    id_qr = models.BigAutoField(primary_key=True, db_column='id_qr')
+    reserva = models.ForeignKey(
+        Reserva,
+        on_delete=models.CASCADE,
+        related_name='codigos_qr',
+        db_column='reserva_id',
+    )
+    token_qr = models.CharField(
+        max_length=64,
+        unique=True,
+        db_column='token_qr',
+        validators=[validate_sha256_hex_token],
+    )
+    tipo_qr = models.CharField(
+        max_length=10,
+        choices=QRCodeType.choices,
+        db_column='tipo_qr',
+    )
+    usado = models.BooleanField(default=False, db_column='usado')
+    fecha_emision = models.DateTimeField(default=timezone.now, db_column='fecha_emision')
+    expiracion = models.DateTimeField(db_column='expiracion', db_index=True)
+
+    class Meta:
+        db_table = 'codigo_qr'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['reserva', 'tipo_qr'],
+                name='uq_codigo_qr_reserva_tipo',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['reserva', 'tipo_qr', 'usado'],
+                name='idx_qr_reserva_tipo_usado',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'QR #{self.id_qr} - reservation {self.reserva_id} ({self.tipo_qr})'
+
+    def clean(self) -> None:
+        if isinstance(self.token_qr, str):
+            self.token_qr = self.token_qr.strip().lower()
+        super().clean()
+        if (
+            self.fecha_emision is not None
+            and self.expiracion is not None
+            and self.expiracion <= self.fecha_emision
+        ):
+            raise ValidationError({
+                'expiracion': ['La fecha de expiración debe ser posterior a la fecha de emisión.'],
+            })
+
+    def save(self, *args, **kwargs) -> None:
+        if isinstance(self.token_qr, str):
+            self.token_qr = self.token_qr.strip().lower()
+        super().save(*args, **kwargs)
