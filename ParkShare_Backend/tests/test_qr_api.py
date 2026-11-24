@@ -157,6 +157,18 @@ class QRAPITests(APITestCase):
         self.assertEqual(res_entry.data['tipo_qr'], QRCodeType.ENTRADA)
         self.assertFalse(res_entry.data['usado'])
         self.assertEqual(res_entry.data['reserva']['estado'], ReservationStatus.CONFIRMADA)
+        self.assertEqual(res_entry.data['reserva']['monto_base'], '80.00')
+        self.assertEqual(res_entry.data['reserva']['cochera']['id_cochera'], self.garage.id_cochera)
+        self.assertEqual(res_entry.data['reserva']['cochera']['nombre'], self.garage.nombre)
+        self.assertEqual(res_entry.data['reserva']['cochera']['direccion'], self.garage.direccion)
+        self.assertIsInstance(res_entry.data['reserva']['cochera']['latitud'], float)
+        self.assertIsInstance(res_entry.data['reserva']['cochera']['longitud'], float)
+        self.assertEqual(res_entry.data['reserva']['arrendatario']['id_usuario'], self.tenant.id_usuario)
+        self.assertEqual(res_entry.data['reserva']['arrendatario']['placas'], 'ABC-123-D')
+        self.assertEqual(
+            res_entry.data['reserva']['arrendatario']['modelo_vehiculo'],
+            'Volkswagen Jetta 2020',
+        )
 
         # /api/v1/ mirror route works
         self.assertEqual(
@@ -333,3 +345,120 @@ class QRAPITests(APITestCase):
         self.assertFalse(
             CodigoQR.objects.filter(reserva=r2, tipo_qr=QRCodeType.SALIDA).exists()
         )
+
+    def test_simular_qr_list_and_post_simulation_lifecycle_api(self):
+        created_at = self.start_dt - timedelta(hours=2)
+        r1 = create_reservation(
+            self.tenant, self.garage.id_cochera, self.start_dt, self.end_dt, now=created_at
+        )
+        confirm_reservation(r1.id_reserva, by_system=True, now=created_at)
+
+        # Unauthenticated -> 401
+        self.client.credentials()
+        self.assertEqual(self.client.get('/reservas/simular-qr').status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            self.client.post('/reservas/simular-qr', {}, format='json').status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+        # Tenant and pending landlord -> 403
+        for forbidden_email in (self.tenant.correo, self.pending_landlord.correo):
+            self._auth_as(forbidden_email)
+            self.assertEqual(self.client.get('/reservas/simular-qr').status_code, status.HTTP_403_FORBIDDEN)
+            self.assertEqual(
+                self.client.post('/reservas/simular-qr', {}, format='json').status_code,
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        # Active landlord lists active QRs for simulation in 3 constant queries (auth + count + select_related list)
+        self._auth_as(self.landlord.correo)
+        with patch('django.utils.timezone.now', return_value=created_at):
+            with self.assertNumQueries(3):
+                res_list = self.client.get('/reservas/simular-qr')
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_list.data['count'], 1)
+        item = res_list.data['results'][0]
+        self.assertEqual(item['reserva_id'], r1.id_reserva)
+        self.assertEqual(item['tipo_qr'], QRCodeType.ENTRADA)
+        self.assertEqual(item['cochera_nombre'], self.garage.nombre)
+        self.assertEqual(item['placas'], 'ABC-123-D')
+        self.assertEqual(item['modelo_vehiculo'], 'Volkswagen Jetta 2020')
+        self.assertEqual(item['nombre_arrendatario'], self.tenant.nombre_completo)
+        self.assertEqual(item['estado_reserva'], ReservationStatus.CONFIRMADA)
+
+        # Other landlord sees 0 active QRs and gets 403 if trying to simulate r1
+        self._auth_as(self.other_landlord.correo)
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_other_list = self.client.get('/reservas/simular-qr')
+            res_other_post = self.client.post(
+                '/reservas/simular-qr', {'reserva_id': r1.id_reserva}, format='json'
+            )
+        self.assertEqual(res_other_list.data['count'], 0)
+        self.assertEqual(res_other_post.status_code, status.HTTP_403_FORBIDDEN)
+
+        self._auth_as(self.landlord.correo)
+
+        # Invalid tipo_qr query param -> 400
+        self.assertEqual(
+            self.client.get('/reservas/simular-qr?tipo_qr=OTRO').status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+        # respetar_ventana=True on future reservation (2h before start) -> 409 Conflict
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_strict = self.client.post(
+                '/reservas/simular-qr',
+                {'reserva_id': r1.id_reserva, 'respetar_ventana': True},
+                format='json',
+            )
+        self.assertEqual(res_strict.status_code, status.HTTP_409_CONFLICT)
+
+        # Mismatched token + reserva_id -> 409 Conflict
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_mismatch = self.client.post(
+                '/reservas/simular-qr',
+                {'token': item['token_qr'], 'reserva_id': r1.id_reserva + 999},
+                format='json',
+            )
+        self.assertEqual(res_mismatch.status_code, status.HTTP_409_CONFLICT)
+
+        # Simulate ENTRADA on future reservation (respetar_ventana=False default)
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_sim_in = self.client.post(
+                '/reservas/simular-qr', {'tipo_qr': 'ENTRADA'}, format='json'
+            )
+        self.assertEqual(res_sim_in.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_sim_in.data['simulado'])
+        self.assertEqual(res_sim_in.data['tipo_qr'], QRCodeType.ENTRADA)
+        self.assertEqual(res_sim_in.data['estado_reserva'], ReservationStatus.EN_USO)
+        self.assertTrue(res_sim_in.data['qr_salida_emitido'])
+
+        # Now GET /api/v1/reservas/simular-qr returns the SALIDA QR
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_list_out = self.client.get('/api/v1/reservas/simular-qr?tipo_qr=SALIDA')
+        self.assertEqual(res_list_out.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_list_out.data['count'], 1)
+        self.assertEqual(res_list_out.data['results'][0]['tipo_qr'], QRCodeType.SALIDA)
+
+        # Simulate SALIDA via /api/v1/reservas/simular-qr with empty body {} -> auto-picks r1 SALIDA
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_sim_out = self.client.post('/api/v1/reservas/simular-qr', {}, format='json')
+        self.assertEqual(res_sim_out.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_sim_out.data['simulado'])
+        self.assertEqual(res_sim_out.data['tipo_qr'], QRCodeType.SALIDA)
+        self.assertEqual(res_sim_out.data['estado_reserva'], ReservationStatus.FINALIZADA)
+
+        # Re-simulating already used token -> 409 QRAlreadyUsed
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_used = self.client.post(
+                '/reservas/simular-qr', {'token': item['token_qr']}, format='json'
+            )
+        self.assertEqual(res_used.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res_used.data['error'], 'QRAlreadyUsed')
+
+        # No active QRs remaining -> 404 NoActiveQRToSimulate
+        with patch('django.utils.timezone.now', return_value=created_at):
+            res_empty = self.client.post('/reservas/simular-qr', {}, format='json')
+        self.assertEqual(res_empty.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(res_empty.data['error'], 'NoActiveQRToSimulate')
+

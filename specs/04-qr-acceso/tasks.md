@@ -104,3 +104,67 @@
     - [x] Tokens generados criptográficamente (SHA-256) y bloqueo transaccional contra doble escaneo.
     - [x] No exposición del token de `SALIDA` al arrendador en `POST /reservas/validar`.
     - [x] Consultas ORM optimizadas (`select_related`), código en inglés y mensajes en español.
+
+---
+
+## Fase 5: Conexión Frontend y Simulación de Escaneo QR (Rojo -> Verde -> Refactor -> Revisión)
+
+- [x] **TASK-04-08 [ROJO]: Escribir tests de enriquecimiento retrocompatible para `GET /reservas/{id}/qr`**
+  - Actualizar `ParkShare_Backend/tests/test_qr_api.py` (sin romper aserciones previas) para exigir en `GET /reservas/{id}/qr`:
+    1. Presencia de `reserva.monto_base` (`str` decimal), `reserva.cochera` (`id_cochera`, `nombre`, `direccion`, `latitud` `float`, `longitud` `float`) y `reserva.arrendatario` (`id_usuario`, `nombre_completo`, `placas`, `modelo_vehiculo`).
+    2. Mantenimiento de `assertNumQueries(3)` gracias al `select_related('arrendatario', 'cochera')` existente.
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_api` y verificar el fallo esperado (Fase Roja).
+
+- [x] **TASK-04-09 [VERDE + REFACTOR]: Enriquecer `QRReservationSummarySerializer` sin consultas extra**
+  - Definir `QRReservationGarageSerializer` (`latitud` y `longitud` como `FloatField`) y `QRReservationTenantSerializer` en `ParkShare_Backend/serializers/qr_serializers.py`.
+  - Incluir `monto_base`, `cochera` y `arrendatario` en `QRReservationSummarySerializer`.
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_api` y verificar el pase en Verde con 3 consultas constantes.
+
+- [x] **TASK-04-10 [ROJO]: Escribir tests unitarios de servicio para simulación de escaneo QR**
+  - Ampliar `ParkShare_Backend/tests/test_qr_services.py` con pruebas para `list_active_qrs_for_simulation` y `simulate_qr_scan`:
+    1. `list_active_qrs_for_simulation(host_user, qr_type=None, now=None)`:
+       - Lista solo QRs activos (`usado=False`, `expiracion > now`) de cocheras del `host_user` en estados válidos (`CONFIRMADA + ENTRADA` o `EN_USO + SALIDA`), ordenados por `fecha_hora_inicio` ascendente.
+       - Excluye QRs de otros arrendadores, usados, expirados o de reservas `SOLICITADA`/`CANCELADA`/`FINALIZADA`/`EXPIRADA`.
+       - Filtra por `qr_type` (`ENTRADA`/`SALIDA`) y rechaza valores inválidos con `DomainValidationError`.
+    2. `simulate_qr_scan(host_user, token=None, reserva_id=None, qr_type=None, respect_window=False, now=None)`:
+       - Resuelve correctamente por `token`, por `reserva_id` + `qr_type`, solo `reserva_id`, solo `qr_type`, o selección automática sin argumentos.
+       - Si `respect_window=False` y la reserva `ENTRADA` es futura (`now < fecha_hora_inicio - 15 min` y `now <= expiracion`), simula la entrada usando `effective_now = reserva.fecha_hora_inicio`, transiciona `CONFIRMADA -> EN_USO` y emite el QR `SALIDA` sin exponer su token.
+       - Permite simular `SALIDA` inmediata tras la entrada simulada aplicando `RN-02`/`RN-03`/`RN-06` (`EN_USO -> FINALIZADA`).
+       - Si `respect_window=True` en reserva futura, rechaza con `ConflictError`.
+       - Mantiene `LateEntryCancelled` si `now > fecha_hora_inicio + 20 min`, `GoneError` si `now > expiracion`, `PermissionDeniedError` si la cochera pertenece a otro arrendador y `NotFoundError` si no existen QRs activos.
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_services` y verificar fallo inicial (Fase Roja).
+
+- [x] **TASK-04-11 [VERDE + REFACTOR]: Implementar servicios de listado y simulación QR**
+  - Implementar `list_active_qrs_for_simulation` y `simulate_qr_scan` en `ParkShare_Backend/services/qr_service.py` reutilizando `validate_scanned_qr` y asegurando:
+    - Bloqueo pesimista `select_for_update()` al resolver la reserva/QR candidato antes de validar.
+    - Optimización ORM con `select_related('reserva__cochera', 'reserva__arrendatario')` sin N+1.
+    - Retorno del resultado con `'simulado': True` sin duplicar lógica de transición ni cálculo de penalizaciones.
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_services` en Verde y refactorizar helpers compartidos de validación de rol/token.
+
+- [x] **TASK-04-12 [ROJO]: Escribir tests de integración API para `GET` y `POST /reservas/simular-qr`**
+  - Ampliar `ParkShare_Backend/tests/test_qr_api.py` cubriendo:
+    1. `GET /reservas/simular-qr` (y `/api/v1/reservas/simular-qr`):
+       - `200 OK` paginado (`count`, `results`) con los 12 campos esperados por `MockQrDemoOption` (`id_qr`, `reserva_id`, `tipo_qr`, `token_qr`, `cochera_nombre`, `placas`, `modelo_vehiculo`, `nombre_arrendatario`, `estado_reserva`, `fecha_hora_inicio`, `fecha_hora_fin`, `expiracion`).
+       - Filtro `?tipo_qr=ENTRADA` / `?tipo_qr=SALIDA` (`200 OK`) y `?tipo_qr=INVALIDO` (`400 Bad Request`).
+       - `401 Unauthorized`, `403 Forbidden` para arrendatario / arrendador pendiente (`RN-08`), aislamiento entre arrendadores y `assertNumQueries` constante.
+    2. `POST /reservas/simular-qr` (y `/api/v1/reservas/simular-qr`):
+       - `200 OK` simulando `ENTRADA` en reserva futura (`{"tipo_qr": "ENTRADA"}`), actualizando `GET /reservas/simular-qr` al nuevo estado (`SALIDA`).
+       - `200 OK` simulando `SALIDA` inmediata (`{"reserva_id": <id>}`) hasta `FINALIZADA`, devolviendo estructura `QrValidationResponse` + `"simulado": true`.
+       - `200 OK` simulando por `{"token": "<sha256>"}`.
+       - `400 Bad Request`, `401 Unauthorized`, `403 Forbidden` (cruzado / rol / `RN-08`), `404 Not Found` (`NoActiveQRToSimulate`), `409 Conflict` (`QRAlreadyUsed`, incompatibilidad `token`/`reserva_id`, `respetar_ventana: true`, `LateEntryCancelled`) y `410 Gone` (`QRExpired`).
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_api` y verificar fallo inicial (Fase Roja).
+
+- [x] **TASK-04-13 [VERDE + REFACTOR]: Implementar serializadores, vista `SimulateQRView` y ruta URL**
+  - Añadir `ActiveSimulationQRSerializer` y `SimulateQRInputSerializer` en `ParkShare_Backend/serializers/qr_serializers.py`.
+  - Implementar `SimulateQRView` (`GET` con `StandardPagination` y `POST`) en `ParkShare_Backend/views/qr_views.py` con permisos `[IsAuthenticated, IsActiveLandlord]` y manejo uniforme de excepciones (`handle_domain_exception`, `validation_error_response`).
+  - Exportar `SimulateQRView` en `ParkShare_Backend/views/__init__.py` y registrar `re_path(r'^reservas/simular-qr/?$', ...)` en `ParkShare_Backend/urls.py` (incluyendo espejo `/api/v1/`).
+  - Ejecutar `python manage.py test ParkShare_Backend.tests.test_qr_api` y refactorizar eliminando cualquier duplicación.
+
+- [x] **TASK-04-14 [REVISIÓN]: Verificación final de Fase 5 y auditoría por el `Reviewer`**
+  - Ejecutar `python manage.py check` y `python manage.py makemigrations --check --dry-run` (confirmar que no existen migraciones pendientes).
+  - Ejecutar `python manage.py test` completo (todos los módulos) y certificar **0 errores y 0 fallos**.
+  - Verificar checklist de auditoría para el **Reviewer**:
+    - [x] Sin cambios al esquema de BD (`codigo_qr`), manteniendo fidelidad al Diccionario de Datos.
+    - [x] Compatibilidad total de payload entre `GET /reservas/{id}/qr`, `GET /reservas/simular-qr`, `POST /reservas/simular-qr` y los componentes `QrScannerScreen.jsx`, `QrDisplayCard.jsx`, `ReservationQrScreen.jsx` y `src/types/qr.ts` de `ParkShareApp`.
+    - [x] `POST /reservas/validar` conserva intactas sus validaciones estrictas de ventana horaria (`-15 min` / `+20 min`).
+    - [x] Consultas ORM optimizadas (`select_related`, sin N+1), código en inglés y mensajes de usuario en español.

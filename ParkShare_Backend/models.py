@@ -80,6 +80,19 @@ class QRCodeType(models.TextChoices):
     SALIDA = 'SALIDA', 'Salida'
 
 
+class PaymentStatus(models.TextChoices):
+    PENDIENTE = 'PENDIENTE', 'Pendiente'
+    APROBADO = 'APROBADO', 'Aprobado'
+    RECHAZADO = 'RECHAZADO', 'Rechazado'
+    REEMBOLSADO = 'REEMBOLSADO', 'Reembolsado'
+
+
+class WithdrawalStatus(models.TextChoices):
+    PENDIENTE = 'PENDIENTE', 'Pendiente'
+    COMPLETADO = 'COMPLETADO', 'Completado'
+    FALLIDO = 'FALLIDO', 'Fallido'
+
+
 class UsuarioManager(BaseUserManager):
     """Custom manager for ParkShare users supporting CLI superuser creation."""
 
@@ -644,3 +657,108 @@ class CodigoQR(models.Model):
         if isinstance(self.token_qr, str):
             self.token_qr = self.token_qr.strip().lower()
         super().save(*args, **kwargs)
+
+
+class Pago(models.Model):
+    """Reservation payment transaction processed through the payment gateway bridge (CU-07)."""
+
+    id_pago = models.BigAutoField(primary_key=True, db_column='id_pago')
+    reserva = models.ForeignKey(
+        Reserva,
+        on_delete=models.PROTECT,
+        related_name='pagos',
+        db_column='reserva_id',
+    )
+    monto_total = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        db_column='monto_total',
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    metodo = models.CharField(max_length=50, db_column='metodo')
+    referencia_pasarela = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_column='referencia_pasarela',
+        db_index=True,
+    )
+    estado = models.CharField(
+        max_length=15,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.PENDIENTE,
+        db_column='estado',
+        db_index=True,
+    )
+    fecha_pago = models.DateTimeField(default=timezone.now, db_column='fecha_pago')
+
+    class Meta:
+        db_table = 'pago'
+        indexes = [
+            models.Index(
+                fields=['reserva', 'estado'],
+                name='idx_pago_reserva_estado',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Payment #{self.id_pago} - reservation {self.reserva_id} ({self.estado})'
+
+    def clean(self) -> None:
+        super().clean()
+        if self.estado == PaymentStatus.APROBADO and self.reserva_id is not None:
+            qs = Pago.objects.filter(reserva_id=self.reserva_id, estado=PaymentStatus.APROBADO)
+            if self.pk is not None:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError({
+                    'estado': ['La reserva ya cuenta con un pago aprobado.'],
+                })
+
+
+class RetiroCobro(models.Model):
+    """Landlord balance payout record to their registered collection account (CU-07)."""
+
+    id_retiro = models.BigAutoField(primary_key=True, db_column='id_retiro')
+    arrendador = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='retiros',
+        db_column='arrendador_id',
+    )
+    cuenta_cobro = models.CharField(max_length=100, db_column='cuenta_cobro')
+    monto = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        db_column='monto',
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    referencia = models.CharField(
+        max_length=100,
+        unique=True,
+        db_column='referencia',
+    )
+    estado = models.CharField(
+        max_length=15,
+        choices=WithdrawalStatus.choices,
+        default=WithdrawalStatus.COMPLETADO,
+        db_column='estado',
+    )
+    fecha_retiro = models.DateTimeField(default=timezone.now, db_column='fecha_retiro')
+
+    class Meta:
+        db_table = 'retiro_cobro'
+        indexes = [
+            models.Index(
+                fields=['arrendador', 'estado', 'fecha_retiro'],
+                name='idx_retiro_arrendador_est',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Withdrawal #{self.id_retiro} - landlord {self.arrendador_id} ({self.monto})'
+
+    def clean(self) -> None:
+        super().clean()
+        if not (self.cuenta_cobro or '').strip():
+            raise ValidationError({'cuenta_cobro': ['La cuenta de cobro es obligatoria.']})

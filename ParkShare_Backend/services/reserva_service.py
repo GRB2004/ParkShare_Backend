@@ -425,6 +425,10 @@ def _execute_transition(
             from ParkShare_Backend.services.qr_service import issue_entry_qr
 
             issue_entry_qr(reservation, now=reference_now)
+        elif reservation.estado == ReservationStatus.CANCELADA:
+            from ParkShare_Backend.services.payment_service import sync_cancellation_payment_if_exists
+
+            sync_cancellation_payment_if_exists(reservation)
 
     if late_entry_cancelled:
         raise ConflictError(

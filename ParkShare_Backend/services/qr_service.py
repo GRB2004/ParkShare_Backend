@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q, QuerySet
 from django.utils import timezone
 
 from ParkShare_Backend.models import (
@@ -51,7 +52,9 @@ def calculate_late_checkout_penalty(
 
 def apply_late_checkout_payment_adjustment_hook(reservation: Reserva) -> None:
     """Decoupled integration hook for Module 05 (`Pago`) late checkout surcharge adjustment."""
-    return None
+    from ParkShare_Backend.services.payment_service import apply_late_checkout_charge
+
+    apply_late_checkout_charge(reservation)
 
 
 def _issue_qr_for_type(
@@ -165,7 +168,9 @@ def get_active_qr_for_reservation(reservation_id: int, tenant_user: Usuario) -> 
             f'La reserva no cuenta con un código QR activo en su estado actual ({reservation.estado}).',
             error_code='InvalidReservationState',
         )
-    return active_qrs[0]
+    active_qr = active_qrs[0]
+    active_qr.reserva = reservation
+    return active_qr
 
 
 def _build_tenant_verification_dict(tenant: Usuario) -> dict:
@@ -183,16 +188,7 @@ def validate_scanned_qr(
     now: datetime | None = None,
 ) -> dict:
     """Atomically validate a scanned ENTRADA or SALIDA QR token for the garage owner (CU-08 / RN-06)."""
-    if (
-        not host_user
-        or not getattr(host_user, 'is_authenticated', False)
-        or host_user.rol != UserRole.ARRENDADOR
-        or host_user.estado_cuenta != AccountStatus.ACTIVA
-    ):
-        raise PermissionDeniedError(
-            'No tienes permiso para validar códigos QR de una cochera.',
-            error_code='Forbidden',
-        )
+    _check_active_host_for_qr(host_user)
 
     if not isinstance(token, str) or not SHA256_HEX_REGEX.match(token.strip()):
         raise DomainValidationError(
@@ -254,6 +250,9 @@ def validate_scanned_qr(
                 reservation.estado = ReservationStatus.CANCELADA
                 reservation.monto_penalizacion = LATE_ENTRY_PENALTY
                 reservation.save(update_fields=['estado', 'monto_penalizacion'])
+                from ParkShare_Backend.services.payment_service import sync_cancellation_payment_if_exists
+
+                sync_cancellation_payment_if_exists(reservation)
                 late_entry_cancelled = True
             else:
                 qr.usado = True
@@ -337,3 +336,162 @@ def validate_scanned_qr(
                 'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
             },
         )
+
+
+def _check_active_host_for_qr(host_user: Usuario) -> None:
+    if (
+        not host_user
+        or not getattr(host_user, 'is_authenticated', False)
+        or host_user.rol != UserRole.ARRENDADOR
+        or host_user.estado_cuenta != AccountStatus.ACTIVA
+    ):
+        raise PermissionDeniedError(
+            'No tienes permiso para validar o simular códigos QR de una cochera.',
+            error_code='Forbidden',
+        )
+
+
+def _normalize_optional_qr_type(qr_type: str | None) -> str | None:
+    if qr_type is None or str(qr_type).strip() == '':
+        return None
+    normalized = str(qr_type).strip().upper()
+    if normalized not in QRCodeType.values:
+        raise DomainValidationError(
+            'El tipo de código QR debe ser ENTRADA o SALIDA.',
+            errors={'tipo_qr': ['Valores permitidos: ENTRADA, SALIDA.']},
+        )
+    return normalized
+
+
+def list_active_qrs_for_simulation(
+    host_user: Usuario,
+    qr_type: str | None = None,
+    now: datetime | None = None,
+) -> QuerySet[CodigoQR]:
+    """Return active, scannable ENTRADA/SALIDA QR codes for the landlord's garages (GET /reservas/simular-qr)."""
+    _check_active_host_for_qr(host_user)
+    normalized_type = _normalize_optional_qr_type(qr_type)
+    reference_now = now or timezone.now()
+
+    scannable_state_filter = (
+        Q(tipo_qr=QRCodeType.ENTRADA, reserva__estado=ReservationStatus.CONFIRMADA)
+        | Q(tipo_qr=QRCodeType.SALIDA, reserva__estado=ReservationStatus.EN_USO)
+    )
+    queryset = (
+        CodigoQR.objects.select_related('reserva__cochera', 'reserva__arrendatario')
+        .filter(
+            reserva__cochera__arrendador_id=host_user.id_usuario,
+            usado=False,
+            expiracion__gt=reference_now,
+        )
+        .filter(scannable_state_filter)
+        .order_by('reserva__fecha_hora_inicio', 'id_qr')
+    )
+    if normalized_type is not None:
+        queryset = queryset.filter(tipo_qr=normalized_type)
+    return queryset
+
+
+def simulate_qr_scan(
+    host_user: Usuario,
+    token: str | None = None,
+    reserva_id: int | None = None,
+    qr_type: str | None = None,
+    respect_window: bool = False,
+    now: datetime | None = None,
+) -> dict:
+    """Resolve and simulate scanning an active QR code for the landlord (POST /reservas/simular-qr)."""
+    _check_active_host_for_qr(host_user)
+    normalized_type = _normalize_optional_qr_type(qr_type)
+    reference_now = now or timezone.now()
+
+    cleaned_token = str(token).strip() if token is not None else ''
+    if cleaned_token:
+        if not SHA256_HEX_REGEX.match(cleaned_token):
+            raise DomainValidationError(
+                'El token QR debe ser una cadena hexadecimal válida de 64 caracteres.',
+                errors={'token': ['El token QR debe ser una cadena hexadecimal válida de 64 caracteres.']},
+            )
+        target_qr = (
+            CodigoQR.objects.select_related('reserva__cochera', 'reserva__arrendatario')
+            .filter(token_qr=cleaned_token.lower())
+            .first()
+        )
+        if target_qr is None:
+            raise NotFoundError('Código QR no encontrado o inválido.', error_code='NotFound')
+        if target_qr.reserva.cochera.arrendador_id != host_user.id_usuario:
+            raise PermissionDeniedError(
+                'No tienes permiso para validar códigos QR de una cochera que no te pertenece.',
+                error_code='Forbidden',
+            )
+        if reserva_id is not None and target_qr.reserva_id != reserva_id:
+            raise ConflictError(
+                'El token QR proporcionado no corresponde a la reserva indicada.',
+                error_code='InvalidReservationState',
+            )
+        if normalized_type is not None and target_qr.tipo_qr != normalized_type:
+            raise ConflictError(
+                'El token QR proporcionado no coincide con el tipo de QR solicitado.',
+                error_code='InvalidReservationState',
+            )
+    elif reserva_id is not None:
+        reservation = (
+            Reserva.objects.select_related('cochera', 'arrendatario')
+            .filter(id_reserva=reserva_id)
+            .first()
+        )
+        if reservation is None:
+            raise NotFoundError('La reserva solicitada no existe.', error_code='NotFound')
+        if reservation.cochera.arrendador_id != host_user.id_usuario:
+            raise PermissionDeniedError(
+                'No tienes permiso para validar códigos QR de una cochera que no te pertenece.',
+                error_code='Forbidden',
+            )
+        if normalized_type is not None:
+            expected_type = normalized_type
+        elif reservation.estado == ReservationStatus.CONFIRMADA:
+            expected_type = QRCodeType.ENTRADA
+        elif reservation.estado == ReservationStatus.EN_USO:
+            expected_type = QRCodeType.SALIDA
+        else:
+            raise ConflictError(
+                f'La reserva no cuenta con un código QR activo para simular en su estado actual ({reservation.estado}).',
+                error_code='InvalidReservationState',
+            )
+        target_qr = (
+            CodigoQR.objects.select_related('reserva__cochera', 'reserva__arrendatario')
+            .filter(reserva=reservation, tipo_qr=expected_type)
+            .first()
+        )
+        if target_qr is None:
+            raise ConflictError(
+                f'La reserva no cuenta con un código QR de {expected_type} disponible.',
+                error_code='InvalidReservationState',
+            )
+    else:
+        target_qr = list_active_qrs_for_simulation(
+            host_user=host_user,
+            qr_type=normalized_type,
+            now=reference_now,
+        ).first()
+        if target_qr is None:
+            raise NotFoundError(
+                'No hay códigos QR activos pendientes de escaneo para simular en tus cocheras.',
+                error_code='NoActiveQRToSimulate',
+            )
+
+    effective_now = reference_now
+    if not respect_window and target_qr.tipo_qr == QRCodeType.ENTRADA:
+        earliest_entry = target_qr.reserva.fecha_hora_inicio - timedelta(
+            minutes=EARLY_ENTRY_WINDOW_MINUTES
+        )
+        if reference_now < earliest_entry and reference_now <= target_qr.expiracion:
+            effective_now = target_qr.reserva.fecha_hora_inicio
+
+    result = validate_scanned_qr(
+        token=target_qr.token_qr,
+        host_user=host_user,
+        now=effective_now,
+    )
+    result['simulado'] = True
+    return result

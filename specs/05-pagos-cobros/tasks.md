@@ -9,7 +9,7 @@
 
 ## Prerrequisitos de Arquitectura y Dependencias
 
-- [ ] **TASK-05-00: Verificar prerrequisitos de módulos base, QR y DRF**
+- [x] **TASK-05-00: Verificar prerrequisitos de módulos base, QR y DRF**
   - Confirmar modelos `Usuario` (con campo `cuenta_cobro` y `estado_cuenta`), `Cochera`, `Reserva` (con `fecha_hora_inicio`, `fecha_hora_fin` y servicio `confirm_reservation`) de los Módulos `01-auth`, `02-cocheras` y `03-reservas`, además del servicio `issue_entry_qr` del Módulo `04-qr-acceso`.
   - Confirmar presencia/autorización de `djangorestframework` en `requirements.txt` (si no está instalado, solicitar aprobación al usuario antes de modificar `requirements.txt`).
 
@@ -17,7 +17,7 @@
 
 ## Fase 1: Modelos `Pago` y `RetiroCobro` y Migraciones (Rojo -> Verde)
 
-- [ ] **TASK-05-01 [ROJO]: Escribir tests de modelos para `Pago` y `RetiroCobro`**
+- [x] **TASK-05-01 [ROJO]: Escribir tests de modelos para `Pago` y `RetiroCobro`**
   - Crear `ParkShare_Backend/tests/test_payment_models.py` con pruebas que deben **fallar inicialmente**:
     1. Creación de `Pago` vinculado a `Reserva` con `monto_total` (`DECIMAL(8, 2)`), `metodo='TARJETA'`, `referencia_pasarela` nullable y default `estado='PENDIENTE'`.
     2. Rechazo de `estado` fuera de `('PENDIENTE', 'APROBADO', 'RECHAZADO', 'REEMBOLSADO')` y rechazo de `monto_total < 0` en validación/constraints.
@@ -26,7 +26,7 @@
     5. Rechazo de `referencia` duplicada en `RetiroCobro` (`IntegrityError`) y rechazo de `monto <= 0`.
   - Ejecutar `python manage.py test` y verificar el fallo esperado (Fase Roja).
 
-- [ ] **TASK-05-02 [VERDE]: Implementar modelos `Pago` y `RetiroCobro` y migrar BD**
+- [x] **TASK-05-02 [VERDE]: Implementar modelos `Pago` y `RetiroCobro` y migrar BD**
   - Implementar `Pago` (`Meta.db_table = 'pago'`) y `RetiroCobro` (`Meta.db_table = 'retiro_cobro'`) en `ParkShare_Backend/models/`.
   - Configurar índices sobre `(reserva, estado)`, `referencia_pasarela`, `(arrendador, estado, fecha_retiro)` y `CheckConstraint` de montos no negativos / positivos.
   - Ejecutar `python manage.py makemigrations` y `python manage.py migrate`.
@@ -36,7 +36,7 @@
 
 ## Fase 2: Puente de Pasarela (`puentes/`), Servicios Financieros y Reglas `RN`
 
-- [ ] **TASK-05-03 [ROJO]: Escribir tests de adaptador de pasarela y lógica de negocio (`RN-02`..`RN-05`)**
+- [x] **TASK-05-03 [ROJO]: Escribir tests de adaptador de pasarela y lógica de negocio (`RN-02`..`RN-05`)**
   - Crear `ParkShare_Backend/tests/test_payment_services.py` probando:
     1. `SimulatedPaymentGatewayAdapter`: retorna aprobación con referencia única ante token válido y rechazo ante `tok_rechazado`.
     2. `process_reservation_payment(reserva, renter, metodo, token_pago)`:
@@ -52,7 +52,7 @@
        - Retiro descuenta el saldo disponible a `"0.00"` y rechaza retiros con saldo `<= 0.00` o sin `cuenta_cobro`.
   - Ejecutar `python manage.py test` y verificar fallo inicial (Fase Roja).
 
-- [ ] **TASK-05-04 [VERDE + REFACTOR]: Implementar Bridge de pasarela y servicios de pago/liquidación**
+- [x] **TASK-05-04 [VERDE + REFACTOR]: Implementar Bridge de pasarela y servicios de pago/liquidación**
   - Implementar interfaz `PaymentGatewayBridge` y `SimulatedPaymentGatewayAdapter` en `ParkShare_Backend/puentes/payment_gateway.py`.
   - Implementar servicios en `ParkShare_Backend/services/payment_service.py` usando `transaction.atomic()`, `select_for_update()`, cálculos estrictos con `decimal.Decimal` y `select_related('reserva__cochera')` para prevenir N+1.
   - Conectar el hook de ajuste de recargo con el servicio de salida del Módulo 04 (`04-qr-acceso`).
@@ -62,7 +62,7 @@
 
 ## Fase 3: Serializadores y Endpoints REST (`/pagos`, `/arrendador/cobros`, `/arrendador/cobros/retirar`)
 
-- [ ] **TASK-05-05 [ROJO]: Escribir tests de integración API (`APITestCase`)**
+- [x] **TASK-05-05 [ROJO]: Escribir tests de integración API (`APITestCase`)**
   - Crear `ParkShare_Backend/tests/test_payment_api.py` cubriendo:
     1. `POST /pagos`:
        - `201 Created` cuando la pasarela aprueba (confirma reserva y crea QR de entrada).
@@ -80,7 +80,7 @@
        - Prueba de concurrencia lógica verificando protección contra doble retiro.
   - Ejecutar `python manage.py test` y verificar fallo inicial (Fase Roja).
 
-- [ ] **TASK-05-06 [VERDE + REFACTOR]: Implementar serializadores, vistas y rutas URL**
+- [x] **TASK-05-06 [VERDE + REFACTOR]: Implementar serializadores, vistas y rutas URL**
   - Crear serializadores DRF (`ProcessPaymentSerializer`, `PagoResponseSerializer`, `HostFinancialSummarySerializer`, `WithdrawBalanceSerializer`) en `ParkShare_Backend/serializers/payment_serializers.py`.
   - Implementar vistas (`ProcessPaymentView`, `HostEarningsView`, `HostWithdrawView`) en `ParkShare_Backend/views/payment_views.py` con permisos por rol (`ARRENDATARIO` / `ARRENDADOR` verificado) y mensajes en español.
   - Registrar rutas `pagos`, `arrendador/cobros` y `arrendador/cobros/retirar` en `ParkShare_Backend/urls.py`.
@@ -90,12 +90,12 @@
 
 ## Fase 4: Verificación Final y Auditoría por el `Reviewer`
 
-- [ ] **TASK-05-07 [REVISIÓN]: Auditoría integral y suite completa de pruebas**
+- [x] **TASK-05-07 [REVISIÓN]: Auditoría integral y suite completa de pruebas**
   - Ejecutar `python manage.py check` y `python manage.py makemigrations --check --dry-run`.
   - Ejecutar `python manage.py test` completo y certificar **0 errores y 0 fallos**.
   - Verificar checklist de auditoría para el **Reviewer**:
-    - [ ] Tabla `pago` coincide 100% con el Diccionario de Datos (`DECIMAL(8,2)`, enums exactos, nulidad).
-    - [ ] Integración limpia mediante `ParkShare_Backend/puentes/` sin credenciales ni datos de tarjeta almacenados.
-    - [ ] Cobertura completa de `CU-06`, `CU-07`, `RN-02`, `RN-03`, `RN-04` y `RN-05`.
-    - [ ] Protección transaccional (`select_for_update`) contra pagos duplicados y retiros dobles.
-    - [ ] Cálculos con `Decimal` y zona horaria `America/Mexico_City`.
+    - [x] Tabla `pago` coincide 100% con el Diccionario de Datos (`DECIMAL(8,2)`, enums exactos, nulidad).
+    - [x] Integración limpia mediante `ParkShare_Backend/puentes/` sin credenciales ni datos de tarjeta almacenados.
+    - [x] Cobertura completa de `CU-06`, `CU-07`, `RN-02`, `RN-03`, `RN-04` y `RN-05`.
+    - [x] Protección transaccional (`select_for_update`) contra pagos duplicados y retiros dobles.
+    - [x] Cálculos con `Decimal` y zona horaria `America/Mexico_City`.

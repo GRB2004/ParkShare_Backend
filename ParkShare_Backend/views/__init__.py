@@ -15,7 +15,8 @@ from .cochera_views import (
     GarageListCreateView,
     LandlordGarageListView,
 )
-from .qr_views import ReservationQRDetailView, ValidateQRView
+from .payment_views import HostEarningsView, HostWithdrawView, ProcessPaymentView
+from .qr_views import ReservationQRDetailView, SimulateQRView, ValidateQRView
 from .reserva_views import (
     ReservationCancelView,
     ReservationDetailUpdateView,
@@ -51,4 +52,8 @@ __all__ = [
     'ReservationCancelView',
     'ReservationQRDetailView',
     'ValidateQRView',
+    'SimulateQRView',
+    'ProcessPaymentView',
+    'HostEarningsView',
+    'HostWithdrawView',
 ]

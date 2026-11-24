@@ -2,8 +2,8 @@
 
 > **Módulo:** `04-qr-acceso`  
 > **Estado:** Listo para Implementación (TDD)  
-> **Versión:** 1.0.0  
-> **Fecha:** 2026-11-19  
+> **Versión:** 1.1.0  
+> **Fecha:** 2026-11-24  
 > **Proyecto:** `ParkShare_Backend` (Django + Django REST Framework + MySQL)  
 > **Trazabilidad MDE:** CIM (`CU-06`, `CU-08`), PIM/PSM (`CodigoQR`, `Reserva`), Reglas de Negocio (`RN-02`, `RN-03`, `RN-06`)
 
@@ -15,8 +15,9 @@ El **Módulo 04 (`04-qr-acceso`)** implementa el subsistema de control de acceso
 
 ### Alcance dentro de `ParkShare_Backend`
 - Generación de tokens criptográficos únicos SHA-256 (64 caracteres hexadecimales) asociados a una reserva (`CodigoQR`).
-- Emisión automática del QR de `ENTRADA` cuando el pago es aprobado y la reserva transiciona a `CONFIRMADA` (invocado desde Módulo 05) y consulta del QR activo por parte del arrendatario (`GET /reservas/{id}/qr`).
+- Emisión automática del QR de `ENTRADA` cuando el pago es aprobado y la reserva transiciona a `CONFIRMADA` (invocado desde Módulo 05) y consulta enriquecida del QR activo por parte del arrendatario (`GET /reservas/{id}/qr`), incluyendo datos de `cochera`, `arrendatario` y `monto_base` requeridos por `QrDisplayCard.jsx` y `ReservationQrScreen.jsx`.
 - Validación atómica y transaccional del QR escaneado por el arrendador (`POST /reservas/validar`) tanto para acceso (`ENTRADA`) como para salida (`SALIDA`).
+- Soporte de **Simulación de escaneo QR** para el bloque *"Pruebas rápidas de escaneo"* de `QrScannerScreen.jsx` (`GET /reservas/simular-qr` para listar QRs activos escaneables de las cocheras del arrendador, y `POST /reservas/simular-qr` para ejecutar la simulación directa por `token`, `reserva_id` y/o `tipo_qr`).
 - Transición segura de estados de la reserva (`CONFIRMADA` -> `EN_USO` -> `FINALIZADA`), registro de `hora_salida_real` y cálculo exacto de recargos por retraso fuera de tolerancia (`RN-02`, `RN-03`).
 - Integración mediante capa de servicios/puentes con el Módulo 03 (`Reserva`) y Módulo 05 (`Pago` / ajuste por penalización).
 
@@ -30,9 +31,10 @@ El **Módulo 04 (`04-qr-acceso`)** implementa el subsistema de control de acceso
 
 | ID | Caso de Uso | Actor Principal | Descripción del Flujo en Backend |
 | :--- | :--- | :--- | :--- |
-| **CU-06** | **Generar QR de acceso** | Arrendatario (disparado tras pago / consultado por el cliente) | Genera un token criptográfico SHA-256 único para la reserva únicamente cuando el pago ha sido aprobado y la reserva se encuentra en estado `CONFIRMADA`. Permite al arrendatario consultar su QR activo según el estado actual de la reserva (`ENTRADA` o `SALIDA`). |
+| **CU-06** | **Generar QR de acceso** | Arrendatario (disparado tras pago / consultado por el cliente) | Genera un token criptográfico SHA-256 único para la reserva únicamente cuando el pago ha sido aprobado y la reserva se encuentra en estado `CONFIRMADA`. Permite al arrendatario consultar su QR activo (`ENTRADA` o `SALIDA`) junto con el resumen de cochera (coordenadas para "Cómo llegar"), vehículo y monto base. |
 | **CU-08** | **Validar QR de llegada** | Arrendador | El arrendador envía el token escaneado al backend. El servidor valida existencia del token, integridad de estado (`usado == 0`), vigencia temporal, estado de la reserva (`CONFIRMADA`) y propiedad de la cochera (`cochera.arrendador_id == usuario autenticado`). Si es válido, marca el QR de entrada como usado, pasa la reserva a `EN_USO`, emite el QR de `SALIDA` y retorna los datos de verificación del arrendatario y su vehículo. |
 | **CU-08 (Extensión Checkout)** | **Validar QR de salida (`RN-06`)** | Arrendador | Al finalizar la estancia, el arrendatario muestra su QR de `SALIDA` y el arrendador lo escanea. El servidor valida token, propiedad y estado `EN_USO`, marca el QR de salida como usado, registra `hora_salida_real = now()`, calcula `monto_penalizacion` según `RN-02` y `RN-03`, y transiciona la reserva a `FINALIZADA`. |
+| **CU-08 (Soporte Frontend: Simular Escaneo)** | **Simular escaneo QR** | Arrendador | Permite al arrendador obtener desde el backend sus QRs activos listos para prueba (`GET /reservas/simular-qr`) y disparar la validación de entrada o salida en el flujo de pruebas rápidas de `QrScannerScreen.jsx` (`POST /reservas/simular-qr`), incluso si la reserva confirmada está programada para más tarde en el día. |
 
 ---
 
@@ -44,6 +46,8 @@ El **Módulo 04 (`04-qr-acceso`)** implementa el subsistema de control de acceso
 | **RN-02 (Tiempo de tolerancia)** | Al concluir el tiempo reservado (`reserva.fecha_hora_fin`), se otorgan exactamente **10 minutos de tolerancia** (`limite_tolerancia = reserva.fecha_hora_fin + 10 min`) para que el arrendatario retire su vehículo sin cargo adicional (`monto_penalizacion = 0.00`). |
 | **RN-03 (Recargo por retraso)** | Si `hora_salida_real > limite_tolerancia`, se cobra **$10.00 MXN por cada minuto de retraso** posterior a los 10 minutos de tolerancia. Ejemplo normativo: salir 10 minutos después del fin de la tolerancia (`fecha_hora_fin + 20 min`) equivale a un cargo de `$100.00 MXN`.<br>**Fórmula determinista:**<br>- Si `hora_salida_real <= fecha_hora_fin + 10 min` -> `minutos_retraso = 0`, `recargo = Decimal("0.00")`.<br>- Si `hora_salida_real > fecha_hora_fin + 10 min` -> `segundos_exceso = (hora_salida_real - (fecha_hora_fin + 10 min)).total_seconds()`; `minutos_retraso = math.ceil(segundos_exceso / 60)`; `recargo = Decimal(minutos_retraso) * Decimal("10.00")`. (El uso de techo por minuto iniciado evita fracciones sin cobro tras vencer la tolerancia y mantiene exactitud en minutos enteros como `600 s = 10 min = $100.00 MXN`). |
 | **Alineación con RN-01 / RN-04 / RN-05** | Si una reserva es cancelada (`estado = 'CANCELADA'`) o expirada (`estado = 'EXPIRADA'`), cualquier QR previamente emitido para ella queda rechazado durante la validación (`409 Conflict` / `410 Gone`). Solo reservas `CONFIRMADA` o `EN_USO` pueden operar códigos QR activos. |
+| **Tolerancia de llegada (`POST /reservas/validar`)** | En el escaneo real (`POST /reservas/validar`), la llegada abre `15` minutos antes de `fecha_hora_inicio` y tolera hasta `20` minutos después de `fecha_hora_inicio`; si `now > fecha_hora_inicio + 20 min`, la reserva se cancela automáticamente con multa de `$100.00 MXN` (`LateEntryCancelled`, `409 Conflict`). |
+| **Regla de Ventana en Simulación (`POST /reservas/simular-qr`)** | En modo simulación rápida (`respetar_ventana = false`, valor por defecto en `POST /reservas/simular-qr`), si la reserva confirmada (`ENTRADA`) está programada para más tarde en el día o en fecha futura (`now < fecha_hora_inicio - 15 min` y `now <= qr.expiracion`), el backend evalúa la entrada tomando como referencia `effective_now = reserva.fecha_hora_inicio`. Con ello se habilita probar entrada y salida inmediata desde `QrScannerScreen.jsx` sin debilitar la validación estricta de `POST /reservas/validar`. Todas las demás reglas (rol `ARRENDADOR` activo `RN-08`, propiedad de cochera, `usado == 0`, no expirado, tolerancia tardía `> inicio + 20 min`, y `RN-02`/`RN-03`/`RN-06` en `SALIDA`) permanecen intactas. Si el cliente envía `"respetar_ventana": true`, se aplica exactamente la ventana anticipada de 15 minutos. |
 
 ### Máquina de Estados de Reserva y Códigos QR
 
@@ -92,9 +96,9 @@ Modelo Django sugerido: `CodigoQR` (`Meta.db_table = 'codigo_qr'`).
   - `expiracion = max(reserva.fecha_hora_fin, now) + timedelta(hours=24)`: **Decisión crítica de diseño** — la expiración técnica del QR de salida debe ser posterior a `reserva.fecha_hora_fin` para permitir que un arrendatario con retraso (`RN-03`) pueda escanear su QR de salida, registrar `hora_salida_real` y recibir el cálculo de recargo en lugar de quedar bloqueado por token expirado.
 
 ### 4.3 Dependencias con Tablas Externas (Módulos 01, 02, 03 y 05)
-El Módulo 04 consulta y actualiza de forma controlada los siguientes campos definidos en módulos previos/adyacentes:
+El Módulo 04 consulta y actualiza de forma controlada los siguientes campos definidos en módulos previos/adyacentes, **sin agregar columnas ni alterar el esquema físico de `codigo_qr`**:
 - **`reserva`** (`03-reservas`): `id_reserva`, `arrendatario_id`, `cochera_id`, `estado` (`SOLICITADA`, `CONFIRMADA`, `EN_USO`, `FINALIZADA`, `CANCELADA`, `EXPIRADA`), `fecha_hora_inicio`, `fecha_hora_fin`, `hora_salida_real`, `monto_base`, `monto_penalizacion`. Delega las transiciones de estado en los servicios `start_reservation_usage` y `finish_reservation` de `03-reservas`.
-- **`cochera`** (`02-cocheras`): `id_cochera`, `arrendador_id`, `nombre`, `direccion`.
+- **`cochera`** (`02-cocheras`): `id_cochera`, `arrendador_id`, `nombre`, `direccion`, `latitud`, `longitud`.
 - **`usuario`** (`01-auth`): `id_usuario`, `nombre_completo`, `rol`, `estado_cuenta` (`'ACTIVA'`), `placas`, `modelo_vehiculo`.
 - **Módulo 05 (`Pago`)**: Al emitir el QR de `ENTRADA` se verifica que la reserva esté `CONFIRMADA`; al calcular recargo por retraso en `SALIDA` (`monto_penalizacion > 0`), se invoca al servicio de ajuste de cobro del Módulo 05 para reflejar el total cobrado (`monto_base + monto_penalizacion`).
 
@@ -117,7 +121,7 @@ Devuelve el código QR activo correspondiente al estado actual de la reserva (`E
 
 #### Respuestas Esperadas
 
-- **`200 OK`** — Reserva en estado `CONFIRMADA` (devuelve QR de `ENTRADA`) o `EN_USO` (devuelve QR de `SALIDA`):
+- **`200 OK`** — Reserva en estado `CONFIRMADA` (devuelve QR de `ENTRADA`) o `EN_USO` (devuelve QR de `SALIDA`). Incluye en `reserva` el resumen enriquecido retrocompatible (`monto_base`, `cochera` con coordenadas numéricas `float` para "Cómo llegar" en `ReservationQrScreen.jsx`, y `arrendatario` para `QrDisplayCard.jsx`):
 
 ```json
 {
@@ -132,10 +136,26 @@ Devuelve el código QR activo correspondiente al estado actual de la reserva (`E
     "id_reserva": 105,
     "estado": "CONFIRMADA",
     "fecha_hora_inicio": "2026-11-19T16:00:00-06:00",
-    "fecha_hora_fin": "2026-11-19T18:00:00-06:00"
+    "fecha_hora_fin": "2026-11-19T18:00:00-06:00",
+    "monto_base": "80.00",
+    "cochera": {
+      "id_cochera": 10,
+      "nombre": "Cochera Los Pinos",
+      "direccion": "Av. Insurgentes Sur 1450",
+      "latitud": 19.371245,
+      "longitud": -99.178342
+    },
+    "arrendatario": {
+      "id_usuario": 14,
+      "nombre_completo": "Carlos Mendoza Ruiz",
+      "placas": "ABC-123-D",
+      "modelo_vehiculo": "Volkswagen Jetta 2020"
+    }
   }
 }
 ```
+
+> **Nota de tipado e integridad ORM:** `cochera.latitud` y `cochera.longitud` se serializan como números JSON (`FloatField`) para compatibilidad directa con `buildExternalMapsUrl()` en `ParkShareApp/src/services/qrService.ts`. Al obtener la reserva con `select_related('arrendatario', 'cochera')`, estos campos no agregan consultas SQL adicionales (`assertNumQueries(3)`).
 
 - **`401 Unauthorized`** — Sin credenciales válidas.
 - **`403 Forbidden`** — El usuario no es `ARRENDATARIO` o intenta consultar el QR de una reserva ajena:
@@ -263,7 +283,7 @@ Valida un token QR escaneado por el arrendador para autorizar la entrada (`CONFI
 }
 ```
 
-- **`409 Conflict`** — El código QR ya fue utilizado (`usado == 1`), la reserva fue cancelada/expirada o no coincide con el estado esperado (`ENTRADA` requiere `CONFIRMADA`; `SALIDA` requiere `EN_USO`), o aún es demasiado pronto para el ingreso (`now < fecha_hora_inicio - 15 min`):
+- **`409 Conflict`** — El código QR ya fue utilizado (`usado == 1`), la reserva fue cancelada/expirada o no coincide con el estado esperado (`ENTRADA` requiere `CONFIRMADA`; `SALIDA` requiere `EN_USO`), es demasiado pronto para el ingreso (`now < fecha_hora_inicio - 15 min`), o excedió la tolerancia de llegada (`now > fecha_hora_inicio + 20 min`, devolviendo `error: "LateEntryCancelled"` con `estado_reserva: "CANCELADA"` y `monto_penalizacion: "100.00"`):
 
 ```json
 {
@@ -280,6 +300,155 @@ Valida un token QR escaneado por el arrendador para autorizar la entrada (`CONFI
   "detail": "El código QR ha expirado y ya no es válido."
 }
 ```
+
+---
+
+### 5.3 `GET /reservas/simular-qr`
+
+Devuelve la lista paginada de códigos QR activos (`usado = false`, `expiracion > now`) pertenecientes a las cocheras del arrendador autenticado que se encuentran listos para escanear (`tipo_qr = 'ENTRADA'` con `reserva.estado == 'CONFIRMADA'`, o `tipo_qr = 'SALIDA'` con `reserva.estado == 'EN_USO'`), alimentando el bloque *"Pruebas rápidas de escaneo"* de `QrScannerScreen.jsx` (`MockQrDemoOption`).
+
+- **Autenticación:** Requerida.
+- **Permisos / Rol:** Usuario autenticado con rol `ARRENDADOR` y `estado_cuenta == 'ACTIVA'` (`IsActiveLandlord`).
+- **Parámetros de consulta (Query Params):**
+  - `tipo_qr` (`string`, opcional): `'ENTRADA'` o `'SALIDA'` (insensible a mayúsculas; si se envía un valor distinto retorna `400 Bad Request`).
+  - `page`, `page_size` (opcionales, paginación estándar DRF `StandardPagination`).
+- **Ordenamiento:** Por `reserva.fecha_hora_inicio` ascendente y `id_qr` ascendente (priorizando los escaneos más próximos).
+- **Cuerpo de petición:** No aplica.
+
+#### Respuestas Esperadas
+
+- **`200 OK`** — Lista paginada con los campos exactos requeridos por el frontend (`MockQrDemoOption` extendido):
+
+```json
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id_qr": 42,
+      "reserva_id": 105,
+      "tipo_qr": "ENTRADA",
+      "token_qr": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "cochera_nombre": "Cochera Los Pinos",
+      "placas": "ABC-123-D",
+      "modelo_vehiculo": "Volkswagen Jetta 2020",
+      "nombre_arrendatario": "Carlos Mendoza Ruiz",
+      "estado_reserva": "CONFIRMADA",
+      "fecha_hora_inicio": "2026-11-24T16:00:00-06:00",
+      "fecha_hora_fin": "2026-11-24T18:00:00-06:00",
+      "expiracion": "2026-11-24T18:00:00-06:00"
+    },
+    {
+      "id_qr": 43,
+      "reserva_id": 104,
+      "tipo_qr": "SALIDA",
+      "token_qr": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      "cochera_nombre": "Cochera Los Pinos",
+      "placas": "XYZ-789-A",
+      "modelo_vehiculo": "Honda Civic 2023",
+      "nombre_arrendatario": "Jorge Luis Hernández",
+      "estado_reserva": "EN_USO",
+      "fecha_hora_inicio": "2026-11-24T12:00:00-06:00",
+      "fecha_hora_fin": "2026-11-24T14:00:00-06:00",
+      "expiracion": "2026-11-25T14:00:00-06:00"
+    }
+  ]
+}
+```
+
+- **`400 Bad Request`** — Valor de `tipo_qr` distinto de `ENTRADA` o `SALIDA`.
+- **`401 Unauthorized`** — Sin credenciales válidas.
+- **`403 Forbidden`** — Usuario no es `ARRENDADOR` o su cuenta no está `ACTIVA` (`RN-08`).
+
+---
+
+### 5.4 `POST /reservas/simular-qr`
+
+Ejecuta la simulación directa de escaneo QR para el arrendador autenticado, resolviendo automáticamente el código QR activo según los parámetros opcionales enviados y devolviendo la misma estructura `QrValidationResponse` de `POST /reservas/validar`.
+
+- **Autenticación:** Requerida.
+- **Permisos / Rol:** Usuario autenticado con rol `ARRENDADOR` y `estado_cuenta == 'ACTIVA'` (`IsActiveLandlord`), propietario de la cochera de la reserva.
+- **Cuerpo de petición (Request Payload JSON — todos los campos son opcionales):**
+
+```json
+{
+  "reserva_id": 105,
+  "tipo_qr": "ENTRADA",
+  "respetar_ventana": false
+}
+```
+
+*(Alternativas válidas: `{"token": "<sha256>"}`, `{"reserva_id": 105}`, `{"tipo_qr": "SALIDA"}`, o `{}` para tomar el primer QR activo disponible).*
+
+#### Reglas de Resolución de Target y Simulación
+1. **Resolución por `token`**: Si se envía `token`, valida el formato SHA-256 (`400` si inválido), localiza el `CodigoQR` (`404` si no existe) y valida que la cochera pertenezca al arrendador (`403` si es ajena). Si además se proporcionó `reserva_id` o `tipo_qr` y no coinciden con ese `CodigoQR`, responde `409 Conflict` / `400 Bad Request`.
+2. **Resolución por `reserva_id` (con o sin `tipo_qr`)**: Busca la `Reserva` (`404` si no existe; `403` si pertenece a otro arrendador). Si no se envía `tipo_qr`, infiere `ENTRADA` si `reserva.estado == 'CONFIRMADA'` o `SALIDA` si `reserva.estado == 'EN_USO'` (`409 Conflict` para cualquier otro estado). Busca el `CodigoQR` correspondiente (`409 Conflict` si ya fue usado o no existe).
+3. **Resolución automática (`tipo_qr` sin `reserva_id`, o `{}` vacío)**: Selecciona dentro de las cocheras del arrendador el primer `CodigoQR` activo (`usado = False`, `expiracion > now`) cuyo tipo coincida con `tipo_qr` (cuando se envió) y cuya reserva esté lista (`CONFIRMADA` para `ENTRADA`, `EN_USO` para `SALIDA`), ordenado por `reserva.fecha_hora_inicio` ascendente y `id_qr` ascendente. Si no hay QRs elegibles, responde `404 Not Found` (`error: "NoActiveQRToSimulate"`).
+4. **Comportamiento para reservas futuras en simulación (`respetar_ventana`)**:
+   - Por defecto (`respetar_ventana = false`): si `tipo_qr == 'ENTRADA'` y `now < reserva.fecha_hora_inicio - 15 min` (reserva programada para más tarde hoy o días próximos) y `now <= qr.expiracion`, la simulación utiliza `effective_now = reserva.fecha_hora_inicio` para ejecutar la validación de entrada (`CONFIRMADA -> EN_USO` + emisión de QR `SALIDA`). En `SALIDA`, la función subyacente ya considera `max(now, reserva.fecha_hora_inicio)`, permitiendo probar el ciclo completo de entrada y salida de forma inmediata.
+   - Si `respetar_ventana = true`: aplica exactamente la misma restricción anticipada de 15 minutos que `POST /reservas/validar` (`409 Conflict` si faltan más de 15 min para `fecha_hora_inicio`).
+   - Si `now > reserva.fecha_hora_inicio + 20 min` al simular `ENTRADA`, se mantiene la regla real de cancelación automática por llegada tardía (`LateEntryCancelled`, `409 Conflict`).
+
+#### Respuestas Esperadas
+
+- **`200 OK` (Simulación de `ENTRADA`)** — Estructura compatible con `QrValidationResponse` más bandera informativa `"simulado": true`:
+
+```json
+{
+  "mensaje": "Entrada autorizada. La reserva ahora se encuentra en uso.",
+  "tipo_qr": "ENTRADA",
+  "estado_reserva": "EN_USO",
+  "qr_salida_emitido": true,
+  "simulado": true,
+  "verificacion": {
+    "reserva_id": 105,
+    "fecha_hora_inicio": "2026-11-24T16:00:00-06:00",
+    "fecha_hora_fin": "2026-11-24T18:00:00-06:00",
+    "arrendatario": {
+      "id_usuario": 14,
+      "nombre_completo": "Carlos Mendoza Ruiz",
+      "placas": "ABC-123-D",
+      "modelo_vehiculo": "Volkswagen Jetta 2020"
+    }
+  }
+}
+```
+
+- **`200 OK` (Simulación de `SALIDA`)** — Estructura compatible con `QrValidationResponse` más bandera informativa `"simulado": true`:
+
+```json
+{
+  "mensaje": "Salida confirmada. Reserva finalizada sin recargos.",
+  "tipo_qr": "SALIDA",
+  "estado_reserva": "FINALIZADA",
+  "simulado": true,
+  "verificacion": {
+    "reserva_id": 105,
+    "fecha_hora_inicio": "2026-11-24T16:00:00-06:00",
+    "fecha_hora_fin": "2026-11-24T18:00:00-06:00",
+    "hora_salida_real": "2026-11-24T16:00:00-06:00",
+    "tolerancia_minutos": 10,
+    "minutos_retraso": 0,
+    "monto_base": "80.00",
+    "monto_penalizacion": "0.00",
+    "monto_total": "80.00",
+    "arrendatario": {
+      "id_usuario": 14,
+      "nombre_completo": "Carlos Mendoza Ruiz",
+      "placas": "ABC-123-D",
+      "modelo_vehiculo": "Volkswagen Jetta 2020"
+    }
+  }
+}
+```
+
+- **`400 Bad Request`** — `token` con formato inválido, `tipo_qr` inválido o `reserva_id` no entero positivo.
+- **`401 Unauthorized`** — Usuario no autenticado.
+- **`403 Forbidden`** — Usuario no es `ARRENDADOR` activo (`RN-08`) o intenta simular una reserva de una cochera ajena.
+- **`404 Not Found`** — Reserva inexistente, token inexistente, o ausencia de QRs activos para simular (`error: "NoActiveQRToSimulate"`).
+- **`409 Conflict`** — QR ya usado (`QRAlreadyUsed`), estado de reserva incompatible (`InvalidReservationState`), incompatibilidad entre `token` y `reserva_id`/`tipo_qr`, entrada tardía > 20 min (`LateEntryCancelled`), o llegada anticipada con `respetar_ventana: true`.
+- **`410 Gone`** — El QR superó su `expiracion` (`QRExpired`).
 
 ---
 
@@ -319,3 +488,33 @@ Valida un token QR escaneado por el arrendador para autorizar la entrada (`CONFI
    - Llegada `10 min` antes de `fecha_hora_inicio` -> `200 OK` (dentro de ventana de cortesía de 15 min).
    - Llegada `2 horas` antes de `fecha_hora_inicio` -> `409 Conflict` (demasiado temprano; `usado` sigue en `False`).
 5. **Integridad de unicidad en BD**: Intentar insertar directamente un segundo `CodigoQR` con el mismo `(reserva_id, tipo_qr)` o el mismo `token_qr` debe lanzar `IntegrityError`.
+
+### 6.4 Escenarios de Integración Frontend y Simulación QR (Fase 5)
+
+#### Casos Felices
+1. **Payload enriquecido en `GET /reservas/{id}/qr`**:
+   - La respuesta `200 OK` incluye `reserva.monto_base` (string decimal), `reserva.cochera` (`id_cochera`, `nombre`, `direccion`, `latitud`, `longitud` como números `float`) y `reserva.arrendatario` (`id_usuario`, `nombre_completo`, `placas`, `modelo_vehiculo`).
+   - Se mantiene un conteo constante de consultas ORM (`assertNumQueries(3)`).
+2. **Listado de QRs activos para simulación (`GET /reservas/simular-qr`)**:
+   - Arrendador activo recibe `200 OK` con `count` y `results` conteniendo exclusivamente sus QRs activos no usados y no expirados (`CONFIRMADA + ENTRADA` y `EN_USO + SALIDA`), ordenados por `fecha_hora_inicio` ascendente, con los 12 campos esperados por el frontend (`id_qr`, `reserva_id`, `tipo_qr`, `token_qr`, `cochera_nombre`, `placas`, `modelo_vehiculo`, `nombre_arrendatario`, `estado_reserva`, `fecha_hora_inicio`, `fecha_hora_fin`, `expiracion`).
+   - El filtro `?tipo_qr=ENTRADA` o `?tipo_qr=SALIDA` acota correctamente los resultados.
+3. **Simulación directa por `tipo_qr`, `reserva_id` o `token` (`POST /reservas/simular-qr`)**:
+   - Envío de `{"tipo_qr": "ENTRADA"}` sobre una reserva confirmada programada para más tarde en el día (`now < fecha_hora_inicio - 15 min`, con `respetar_ventana=false` por defecto) -> `200 OK`, `"simulado": true`, `estado_reserva == "EN_USO"`, emite QR de `SALIDA`, no expone el `token_qr` de salida en la respuesta y refleja el cambio al volver a llamar `GET /reservas/simular-qr` (desaparece el QR `ENTRADA` y aparece el `SALIDA`).
+   - Envío inmediato de `{"reserva_id": <id>}` o `{"tipo_qr": "SALIDA"}` -> `200 OK`, `"simulado": true`, `estado_reserva == "FINALIZADA"`, `hora_salida_real >= fecha_hora_inicio`, calcula `RN-02`/`RN-03`, y desaparece de `GET /reservas/simular-qr`.
+   - Envío de `{"token": "<sha256>"}` ejecuta la misma validación y retorna `200 OK` con `"simulado": true`.
+
+#### Casos de Error, Validación y Límite
+1. **Aislamiento de arrendador y control de roles (`GET` y `POST /reservas/simular-qr`)**:
+   - Sin token -> `401 Unauthorized`.
+   - `ARRENDATARIO`, `ADMIN` o `ARRENDADOR` pendiente/suspendido (`RN-08`) -> `403 Forbidden`.
+   - Arrendador A no ve en `GET /reservas/simular-qr` los QRs de Arrendador B, y si intenta `POST /reservas/simular-qr` con `reserva_id` o `token` de Arrendador B -> `403 Forbidden`.
+2. **Parámetros inválidos**:
+   - `GET /reservas/simular-qr?tipo_qr=OTRO` -> `400 Bad Request`.
+   - `POST /reservas/simular-qr` con `token` no hexadecimal, `tipo_qr` desconocido o `reserva_id <= 0` -> `400 Bad Request`.
+   - `POST /reservas/simular-qr` enviando `token` y `reserva_id` de reservas distintas -> `409 Conflict`.
+3. **Sin QRs disponibles para simular**: Si el arrendador no tiene QRs activos elegibles del tipo solicitado -> `POST /reservas/simular-qr` responde `404 Not Found` (`NoActiveQRToSimulate`) y `GET /reservas/simular-qr` devuelve `count: 0, results: []`.
+4. **Modo estricto `respetar_ventana: true`**: Al enviar `{"reserva_id": <id>, "respetar_ventana": true}` sobre reserva futura (`now < fecha_hora_inicio - 15 min`) -> `409 Conflict` sin consumir el QR.
+5. **Tolerancia tardía (`> inicio + 20 min`) y expiración en simulación**:
+   - Simular `ENTRADA` cuando `now > fecha_hora_inicio + 20 min` mantiene `LateEntryCancelled` (`409 Conflict`, cancelación con `$100.00 MXN`).
+   - Simular sobre QR expirado (`now > expiracion`) responde `410 Gone`.
+   - Simular dos veces la misma `reserva_id` con `tipo_qr="ENTRADA"` -> la segunda llamada responde `409 Conflict` (`QRAlreadyUsed`).

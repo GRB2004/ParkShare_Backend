@@ -32,6 +32,8 @@ from ParkShare_Backend.services.qr_service import (
     generate_sha256_qr_token,
     get_active_qr_for_reservation,
     issue_entry_qr,
+    list_active_qrs_for_simulation,
+    simulate_qr_scan,
     validate_scanned_qr,
 )
 from ParkShare_Backend.services.reserva_service import confirm_reservation, create_reservation
@@ -326,3 +328,84 @@ class QRServicesTests(TestCase):
         self.assertEqual(r3.monto_penalizacion, Decimal('100.00'))
         qr3.refresh_from_db()
         self.assertFalse(qr3.usado)
+
+    def test_list_active_qrs_for_simulation_and_simulate_qr_scan(self):
+        # 1. Create a future confirmed reservation (2 hours from self.now)
+        r1 = create_reservation(
+            self.tenant, self.garage.id_cochera, self.start_dt, self.end_dt, now=self.now
+        )
+        confirm_reservation(r1.id_reserva, by_system=True, now=self.now)
+
+        # Create a reservation on another landlord's garage (must be excluded)
+        other_garage = _create_garage(self.other_landlord, rate='50.00')
+        r_other = create_reservation(
+            self.other_tenant,
+            other_garage.id_cochera,
+            self.start_dt + timedelta(hours=3),
+            self.end_dt + timedelta(hours=3),
+            now=self.now,
+        )
+        confirm_reservation(r_other.id_reserva, by_system=True, now=self.now)
+
+        # Unauthorized callers rejected
+        for bad_user in (self.tenant, self.pending_landlord):
+            with self.assertRaises(PermissionDeniedError):
+                list_active_qrs_for_simulation(bad_user, now=self.now)
+
+        # Invalid qr_type filter -> DomainValidationError
+        with self.assertRaises(DomainValidationError):
+            list_active_qrs_for_simulation(self.landlord, qr_type='INVALIDO', now=self.now)
+
+        # List active QRs for self.landlord -> only r1's ENTRADA QR
+        active_list = list(list_active_qrs_for_simulation(self.landlord, now=self.now))
+        self.assertEqual(len(active_list), 1)
+        self.assertEqual(active_list[0].reserva_id, r1.id_reserva)
+        self.assertEqual(active_list[0].tipo_qr, QRCodeType.ENTRADA)
+
+        # With respect_window=True on future reservation (2h before start) -> ConflictError
+        with self.assertRaises(ConflictError):
+            simulate_qr_scan(
+                self.landlord,
+                reserva_id=r1.id_reserva,
+                respect_window=True,
+                now=self.now,
+            )
+
+        # Default respect_window=False on future reservation -> simulates ENTRADA using start_dt
+        sim_entry = simulate_qr_scan(
+            self.landlord,
+            qr_type=QRCodeType.ENTRADA,
+            now=self.now,
+        )
+        self.assertTrue(sim_entry['simulado'])
+        self.assertEqual(sim_entry['tipo_qr'], QRCodeType.ENTRADA)
+        self.assertEqual(sim_entry['estado_reserva'], ReservationStatus.EN_USO)
+        self.assertTrue(sim_entry['qr_salida_emitido'])
+        self.assertNotIn('token_qr', sim_entry)
+
+        # Now active QRs for simulation has SALIDA for r1
+        active_after_entry = list(
+            list_active_qrs_for_simulation(self.landlord, qr_type='SALIDA', now=self.now)
+        )
+        self.assertEqual(len(active_after_entry), 1)
+        self.assertEqual(active_after_entry[0].tipo_qr, QRCodeType.SALIDA)
+
+        # Simulate SALIDA immediately by reserva_id -> transitions to FINALIZADA
+        sim_exit = simulate_qr_scan(
+            self.landlord,
+            reserva_id=r1.id_reserva,
+            now=self.now,
+        )
+        self.assertTrue(sim_exit['simulado'])
+        self.assertEqual(sim_exit['tipo_qr'], QRCodeType.SALIDA)
+        self.assertEqual(sim_exit['estado_reserva'], ReservationStatus.FINALIZADA)
+
+        # No more active QRs for self.landlord -> NotFoundError (NoActiveQRToSimulate)
+        with self.assertRaises(NotFoundError) as cm_empty:
+            simulate_qr_scan(self.landlord, now=self.now)
+        self.assertEqual(cm_empty.exception.error_code, 'NoActiveQRToSimulate')
+
+        # Attempting to simulate another landlord's reservation -> PermissionDeniedError
+        with self.assertRaises(PermissionDeniedError):
+            simulate_qr_scan(self.landlord, reserva_id=r_other.id_reserva, now=self.now)
+
