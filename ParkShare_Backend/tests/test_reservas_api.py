@@ -1,5 +1,6 @@
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
@@ -398,4 +399,75 @@ class ReservasAPITests(APITestCase):
         self.assertEqual(res_search.status_code, status.HTTP_200_OK)
         by_id = {item['id_cochera']: item for item in res_search.data['results']}
         self.assertEqual(by_id[multi_garage.id_cochera]['espacios_disponibles_ahora'], 1)
+
+    def test_rn08_single_active_reservation_api(self):
+        self._auth_as(self.tenant.correo)
+        payload1 = {
+            'cochera_id': self.garage.id_cochera,
+            'fecha_hora_inicio': self.future_start.isoformat(),
+            'fecha_hora_fin': self.future_end.isoformat(),
+        }
+        res1 = self.client.post('/reservas', payload1, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
+        res_id = res1.data['id_reserva']
+
+        # Attempt to create second reservation while first is SOLICITADA -> 409 Conflict
+        payload2 = {
+            'cochera_id': self.garage.id_cochera,
+            'fecha_hora_inicio': (self.future_end + timedelta(hours=1)).isoformat(),
+            'fecha_hora_fin': (self.future_end + timedelta(hours=2)).isoformat(),
+        }
+        res2 = self.client.post('/reservas', payload2, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res2.data['error'], 'ActiveReservationExists')
+        self.assertIn('Ya cuentas con una reservación activa', res2.data['detail'])
+
+        # Cancel first reservation -> now can create second reservation
+        res_cancel = self.client.post(f'/reservas/{res_id}/cancelar')
+        self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_cancel.data['estado'], ReservationStatus.CANCELADA)
+
+        res3 = self.client.post('/reservas', payload2, format='json')
+        self.assertEqual(res3.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res3.data['estado'], ReservationStatus.SOLICITADA)
+
+    def test_rn07_patch_tolerance_and_late_auto_cancellation_api(self):
+        now_dt = timezone.now()
+        # Case 1: Entry exactly at boundary (+20m00s) -> 200 OK, transitions to EN_USO
+        r1 = Reserva.objects.create(
+            arrendatario=self.other_tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=now_dt + timedelta(minutes=10),
+            fecha_hora_fin=now_dt + timedelta(hours=2),
+            monto_base=Decimal('80.00'),
+            estado=ReservationStatus.CONFIRMADA,
+        )
+        self._auth_as(self.landlord.correo)
+        with patch('django.utils.timezone.now', return_value=r1.fecha_hora_inicio + timedelta(minutes=20)):
+            res1 = self.client.patch(f'/reservas/{r1.id_reserva}', {'estado': 'EN_USO'}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(res1.data['estado'], ReservationStatus.EN_USO)
+
+        # Case 2: Entry 1 second late (+20m01s) -> 409 Conflict with LateEntryCancelled payload
+        r2 = Reserva.objects.create(
+            arrendatario=self.tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=now_dt + timedelta(hours=3),
+            fecha_hora_fin=now_dt + timedelta(hours=5),
+            monto_base=Decimal('80.00'),
+            estado=ReservationStatus.CONFIRMADA,
+        )
+        late_now = r2.fecha_hora_inicio + timedelta(minutes=20, seconds=1)
+        with patch('django.utils.timezone.now', return_value=late_now):
+            res2 = self.client.patch(f'/reservas/{r2.id_reserva}', {'estado': 'EN_USO'}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res2.data['error'], 'LateEntryCancelled')
+        self.assertEqual(res2.data['estado_reserva'], ReservationStatus.CANCELADA)
+        self.assertEqual(res2.data['monto_penalizacion'], '100.00')
+        self.assertIn('Se excedió la tolerancia de 20 minutos para la entrada', res2.data['detail'])
+
+        # DB persistence check
+        r2.refresh_from_db()
+        self.assertEqual(r2.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r2.monto_penalizacion, Decimal('100.00'))
 

@@ -220,10 +220,13 @@ class ReservaTransactionalServicesTests(TestCase):
         )
         self.assertEqual(r2.monto_base, Decimal('45.00'))
 
-        # After canceling r1, [10:00, 11:30) is freed
+        # After canceling r1, [10:00, 11:30) is freed for self.tenant (who now has no active reservation)
         cancel_reservation(r1.id_reserva, self.tenant, now=self.now)
-        r3 = create_reservation(self.other_tenant, garage.id_cochera, start, end, now=self.now)
+        r3 = create_reservation(self.tenant, garage.id_cochera, start, end, now=self.now)
         self.assertEqual(r3.estado, ReservationStatus.SOLICITADA)
+
+        # Cancel r3 before creating overnight reservation so self.tenant has no active reservation (RN-08)
+        cancel_reservation(r3.id_reserva, self.tenant, now=self.now)
 
         # Overnight crossing Friday -> Saturday (2026-11-27 22:00 to 2026-11-28 02:00)
         night_garage = _create_garage_with_schedule(
@@ -401,13 +404,6 @@ class ReservaTransactionalServicesTests(TestCase):
     def test_list_reservations_for_user_views(self):
         garage = _create_garage_with_schedule(self.landlord, spaces=2)
         start = datetime(2026, 11, 23, 10, 0, tzinfo=MEXICO_TZ)
-        r_active = create_reservation(
-            self.tenant,
-            garage.id_cochera,
-            start,
-            start + timedelta(minutes=60),
-            now=self.now,
-        )
         r_done = create_reservation(
             self.tenant,
             garage.id_cochera,
@@ -416,6 +412,13 @@ class ReservaTransactionalServicesTests(TestCase):
             now=self.now,
         )
         cancel_reservation(r_done.id_reserva, self.tenant, now=self.now)
+        r_active = create_reservation(
+            self.tenant,
+            garage.id_cochera,
+            start,
+            start + timedelta(minutes=60),
+            now=self.now,
+        )
 
         upcoming = list_reservations_for_user(self.tenant, view_filter='proximas')
         self.assertEqual([r.id_reserva for r in upcoming], [r_active.id_reserva])
@@ -425,4 +428,103 @@ class ReservaTransactionalServicesTests(TestCase):
 
         with self.assertRaises(DomainValidationError):
             list_reservations_for_user(self.tenant, view_filter='en_uso')
+
+    def test_rn08_single_active_reservation_per_tenant(self):
+        garage1 = _create_garage_with_schedule(self.landlord, spaces=2)
+        garage2 = _create_garage_with_schedule(self.other_landlord, spaces=2)
+        start1 = datetime(2026, 11, 23, 10, 0, tzinfo=MEXICO_TZ)
+        end1 = datetime(2026, 11, 23, 11, 0, tzinfo=MEXICO_TZ)
+        start2 = datetime(2026, 11, 23, 12, 0, tzinfo=MEXICO_TZ)
+        end2 = datetime(2026, 11, 23, 13, 0, tzinfo=MEXICO_TZ)
+
+        # 1. First reservation in SOLICITADA
+        r1 = create_reservation(self.tenant, garage1.id_cochera, start1, end1, now=self.now)
+        self.assertEqual(r1.estado, ReservationStatus.SOLICITADA)
+
+        # Attempt to create second reservation while r1 is SOLICITADA -> ConflictError
+        with self.assertRaises(ConflictError) as cm:
+            create_reservation(self.tenant, garage2.id_cochera, start2, end2, now=self.now)
+        self.assertIn('Ya cuentas con una reservación activa', str(cm.exception))
+
+        # 2. Transition r1 to CONFIRMADA -> still blocks second reservation
+        confirm_reservation(r1.id_reserva, actor=self.admin)
+        with self.assertRaises(ConflictError):
+            create_reservation(self.tenant, garage1.id_cochera, start2, end2, now=self.now)
+
+        # 3. Transition r1 to EN_USO -> still blocks second reservation
+        start_reservation_usage(r1.id_reserva, actor=self.landlord, now=start1)
+        with self.assertRaises(ConflictError):
+            create_reservation(self.tenant, garage2.id_cochera, start2, end2, now=self.now)
+
+        # 4. Finish r1 (FINALIZADA) -> tenant can now create another reservation
+        finish_reservation(r1.id_reserva, actor=self.landlord, real_checkout_dt=end1)
+        r2 = create_reservation(self.tenant, garage2.id_cochera, start2, end2, now=self.now)
+        self.assertEqual(r2.estado, ReservationStatus.SOLICITADA)
+
+        # 5. Cancel r2 (CANCELADA) -> tenant can now create r3
+        cancel_reservation(r2.id_reserva, self.tenant, now=self.now)
+        start3 = datetime(2026, 11, 23, 14, 0, tzinfo=MEXICO_TZ)
+        end3 = datetime(2026, 11, 23, 15, 0, tzinfo=MEXICO_TZ)
+        r3 = create_reservation(self.tenant, garage1.id_cochera, start3, end3, now=self.now)
+        self.assertEqual(r3.estado, ReservationStatus.SOLICITADA)
+
+        # 6. Expire r3 (EXPIRADA) -> tenant can now create r4
+        confirm_reservation(r3.id_reserva, actor=self.admin)
+        transition_reservation_state(
+            r3.id_reserva,
+            actor=self.landlord,
+            target_status=ReservationStatus.EXPIRADA,
+            now=end3 + timedelta(minutes=1),
+        )
+        start4 = datetime(2026, 11, 23, 16, 0, tzinfo=MEXICO_TZ)
+        end4 = datetime(2026, 11, 23, 17, 0, tzinfo=MEXICO_TZ)
+        r4 = create_reservation(self.tenant, garage1.id_cochera, start4, end4, now=self.now)
+        self.assertEqual(r4.estado, ReservationStatus.SOLICITADA)
+
+    def test_rn07_entry_tolerance_and_auto_cancellation_with_penalty(self):
+        garage = _create_garage_with_schedule(self.landlord, spaces=2, rate='50.00')
+        start = datetime(2026, 11, 23, 14, 0, tzinfo=MEXICO_TZ)
+        end = datetime(2026, 11, 23, 16, 0, tzinfo=MEXICO_TZ)
+
+        # Case 1: Entry exactly at tolerance boundary (+20m00s) -> Succeeds into EN_USO
+        r1 = create_reservation(self.tenant, garage.id_cochera, start, end, now=self.now)
+        confirm_reservation(r1.id_reserva, actor=self.admin)
+        at_boundary = start + timedelta(minutes=20)
+        started_r1 = start_reservation_usage(r1.id_reserva, actor=self.landlord, now=at_boundary)
+        self.assertEqual(started_r1.estado, ReservationStatus.EN_USO)
+        self.assertEqual(started_r1.monto_penalizacion, Decimal('0.00'))
+
+        # Finish r1 so other tenant or tenant can create next
+        finish_reservation(r1.id_reserva, actor=self.landlord, real_checkout_dt=start + timedelta(minutes=40))
+
+        # Case 2: Entry 1 second late (+20m01s) -> Auto-cancelled with $100.00 penalty & ConflictError
+        r2 = create_reservation(self.tenant, garage.id_cochera, start + timedelta(hours=2), end + timedelta(hours=2), now=self.now)
+        confirm_reservation(r2.id_reserva, actor=self.admin)
+        one_second_late = (start + timedelta(hours=2)) + timedelta(minutes=20, seconds=1)
+        with self.assertRaises(ConflictError) as cm:
+            transition_reservation_state(
+                r2.id_reserva,
+                actor=self.landlord,
+                target_status=ReservationStatus.EN_USO,
+                now=one_second_late,
+            )
+        self.assertEqual(cm.exception.error_code, 'LateEntryCancelled')
+        self.assertIn('Se excedió la tolerancia de 20 minutos para la entrada', str(cm.exception))
+
+        # Check DB persistence: must be CANCELADA with 100.00 penalty despite exception
+        r2.refresh_from_db()
+        self.assertEqual(r2.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r2.monto_penalizacion, Decimal('100.00'))
+
+        # Case 3: Entry at +21m -> Also auto-cancelled with $100.00 penalty
+        r3 = create_reservation(self.tenant, garage.id_cochera, start + timedelta(hours=5), end + timedelta(hours=5), now=self.now)
+        confirm_reservation(r3.id_reserva, actor=self.admin)
+        twenty_one_late = (start + timedelta(hours=5)) + timedelta(minutes=21)
+        with self.assertRaises(ConflictError) as cm3:
+            start_reservation_usage(r3.id_reserva, actor=self.landlord, now=twenty_one_late)
+        self.assertEqual(cm3.exception.error_code, 'LateEntryCancelled')
+
+        r3.refresh_from_db()
+        self.assertEqual(r3.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r3.monto_penalizacion, Decimal('100.00'))
 

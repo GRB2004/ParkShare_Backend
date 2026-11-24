@@ -60,10 +60,16 @@ class NotFoundError(Exception):
 class ConflictError(Exception):
     """State conflict error mapping to HTTP 409 Conflict."""
 
-    def __init__(self, detail: str, error_code: str | None = None):
+    def __init__(
+        self,
+        detail: str,
+        error_code: str | None = None,
+        extra_data: dict | None = None,
+    ):
         super().__init__(detail)
         self.detail = detail
         self.error_code = error_code
+        self.extra_data = extra_data or {}
 
 
 class PermissionDeniedError(Exception):

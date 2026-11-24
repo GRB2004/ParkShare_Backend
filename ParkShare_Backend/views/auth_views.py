@@ -66,6 +66,8 @@ def handle_domain_exception(exc: Exception) -> Response:
         payload = {'detail': exc.detail}
         if getattr(exc, 'error_code', None):
             payload['error'] = exc.error_code
+        if getattr(exc, 'extra_data', None):
+            payload.update(exc.extra_data)
         return Response(payload, status=status.HTTP_409_CONFLICT)
     if isinstance(exc, GoneError):
         return Response({'error': exc.error_code, 'detail': exc.detail}, status=status.HTTP_410_GONE)

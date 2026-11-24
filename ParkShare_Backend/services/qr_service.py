@@ -23,6 +23,8 @@ from ParkShare_Backend.services.auth_service import (
     PermissionDeniedError,
 )
 from ParkShare_Backend.services.reserva_service import (
+    ENTRY_TOLERANCE_MINUTES,
+    LATE_ENTRY_PENALTY,
     TOLERANCE_MINUTES,
     calculate_late_surcharge,
     finish_reservation,
@@ -200,6 +202,7 @@ def validate_scanned_qr(
 
     normalized_token = token.strip().lower()
     reference_now = now or timezone.now()
+    late_entry_cancelled = False
 
     with transaction.atomic():
         qr = (
@@ -246,60 +249,68 @@ def validate_scanned_qr(
                     error_code='InvalidReservationState',
                 )
 
-            qr.usado = True
-            qr.save(update_fields=['usado'])
-            updated_reservation = start_reservation_usage(
-                reservation.id_reserva,
-                actor=host_user,
-                now=reference_now,
-            )
-            issue_exit_qr(updated_reservation, now=reference_now)
+            entry_limit = reservation.fecha_hora_inicio + timedelta(minutes=ENTRY_TOLERANCE_MINUTES)
+            if reference_now > entry_limit:
+                reservation.estado = ReservationStatus.CANCELADA
+                reservation.monto_penalizacion = LATE_ENTRY_PENALTY
+                reservation.save(update_fields=['estado', 'monto_penalizacion'])
+                late_entry_cancelled = True
+            else:
+                qr.usado = True
+                qr.save(update_fields=['usado'])
+                updated_reservation = start_reservation_usage(
+                    reservation.id_reserva,
+                    actor=host_user,
+                    now=reference_now,
+                )
+                issue_exit_qr(updated_reservation, now=reference_now)
 
-            return {
-                'mensaje': 'Entrada autorizada. La reserva ahora se encuentra en uso.',
-                'tipo_qr': QRCodeType.ENTRADA,
-                'estado_reserva': updated_reservation.estado,
-                'qr_salida_emitido': True,
-                'verificacion': {
-                    'reserva_id': updated_reservation.id_reserva,
-                    'fecha_hora_inicio': updated_reservation.fecha_hora_inicio,
-                    'fecha_hora_fin': updated_reservation.fecha_hora_fin,
-                    'arrendatario': _build_tenant_verification_dict(updated_reservation.arrendatario),
-                },
-            }
+                return {
+                    'mensaje': 'Entrada autorizada. La reserva ahora se encuentra en uso.',
+                    'tipo_qr': QRCodeType.ENTRADA,
+                    'estado_reserva': updated_reservation.estado,
+                    'qr_salida_emitido': True,
+                    'verificacion': {
+                        'reserva_id': updated_reservation.id_reserva,
+                        'fecha_hora_inicio': updated_reservation.fecha_hora_inicio,
+                        'fecha_hora_fin': updated_reservation.fecha_hora_fin,
+                        'arrendatario': _build_tenant_verification_dict(updated_reservation.arrendatario),
+                    },
+                }
 
         # Case qr.tipo_qr == QRCodeType.SALIDA (RN-06)
-        if reservation.estado != ReservationStatus.EN_USO:
-            raise ConflictError(
-                f'La reserva no se encuentra en uso para confirmar salida (estado actual: {reservation.estado}).',
-                error_code='InvalidReservationState',
+        elif qr.tipo_qr == QRCodeType.SALIDA:
+            if reservation.estado != ReservationStatus.EN_USO:
+                raise ConflictError(
+                    f'La reserva no se encuentra en uso para confirmar salida (estado actual: {reservation.estado}).',
+                    error_code='InvalidReservationState',
+                )
+            if reference_now > qr.expiracion:
+                raise GoneError('El código QR ha expirado y ya no es válido.')
+
+            qr.usado = True
+            qr.save(update_fields=['usado'])
+
+            effective_checkout = max(reference_now, reservation.fecha_hora_inicio)
+            updated_reservation = finish_reservation(
+                reservation.id_reserva,
+                actor=host_user,
+                real_checkout_dt=effective_checkout,
+                now=reference_now,
             )
-        if reference_now > qr.expiracion:
-            raise GoneError('El código QR ha expirado y ya no es válido.')
+            late_minutes, _ = calculate_late_checkout_penalty(
+                updated_reservation.fecha_hora_fin,
+                updated_reservation.hora_salida_real,
+            )
+            if updated_reservation.monto_penalizacion > Decimal('0.00'):
+                apply_late_checkout_payment_adjustment_hook(updated_reservation)
 
-        qr.usado = True
-        qr.save(update_fields=['usado'])
-
-        effective_checkout = max(reference_now, reservation.fecha_hora_inicio)
-        updated_reservation = finish_reservation(
-            reservation.id_reserva,
-            actor=host_user,
-            real_checkout_dt=effective_checkout,
-            now=reference_now,
-        )
-        late_minutes, _ = calculate_late_checkout_penalty(
-            updated_reservation.fecha_hora_fin,
-            updated_reservation.hora_salida_real,
-        )
-        if updated_reservation.monto_penalizacion > Decimal('0.00'):
-            apply_late_checkout_payment_adjustment_hook(updated_reservation)
-
-        message = (
-            'Salida confirmada. Reserva finalizada con recargo por retraso.'
-            if late_minutes > 0
-            else 'Salida confirmada. Reserva finalizada sin recargos.'
-        )
-        return {
+            message = (
+                'Salida confirmada. Reserva finalizada con recargo por retraso.'
+                if late_minutes > 0
+                else 'Salida confirmada. Reserva finalizada sin recargos.'
+            )
+            return {
             'mensaje': message,
             'tipo_qr': QRCodeType.SALIDA,
             'estado_reserva': updated_reservation.estado,
@@ -316,3 +327,13 @@ def validate_scanned_qr(
                 'arrendatario': _build_tenant_verification_dict(updated_reservation.arrendatario),
             },
         }
+
+    if late_entry_cancelled:
+        raise ConflictError(
+            'Se excedió la tolerancia de 20 minutos para la entrada. La reservación fue cancelada automáticamente con una multa de $100.00 MXN.',
+            error_code='LateEntryCancelled',
+            extra_data={
+                'estado_reserva': ReservationStatus.CANCELADA,
+                'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
+            },
+        )

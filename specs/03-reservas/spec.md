@@ -4,13 +4,14 @@
 
 ## 1. Resumen y Alcance
 
-Este módulo implementa el ciclo de vida completo de las reservaciones de espacios de estacionamiento en **ParkShare_Backend**: creación validada con control de concurrencia y disponibilidad horaria (**CU-05**), máquina de estados estricta, cálculo de monto base, tolerancia de salida, recargos por retraso y multas por cancelación tardía (**RN-01 a RN-05**).
+Este módulo implementa el ciclo de vida completo de las reservaciones de espacios de estacionamiento en **ParkShare_Backend**: creación validada con control de concurrencia, disponibilidad horaria y reserva única activa (**CU-05**, **RN-08**), máquina de estados estricta, cálculo de monto base, tolerancia de entrada con cancelación y multa automática (**RN-07**), tolerancia de salida, recargos por retraso y multas por cancelación tardía (**RN-01 a RN-08**).
 
 ### Alcance incluido
 - Modelo `reserva` con integridad referencial hacia `usuario` (Módulo `01-auth`) y `cochera` (Módulo `02-cocheras`).
-- Validación de duración en bloques exactos de 30 minutos hasta 24 horas (**RN-01**), cobertura dentro de la tabla `disponibilidad` y verificación atómica de cupo contra `espacios_totales` mediante bloqueo pesimista (`select_for_update`).
+- Validación de duración en bloques exactos de 30 minutos hasta 24 horas (**RN-01**), cobertura dentro de la tabla `disponibilidad`, restricción de **1 reserva activa simultánea por arrendatario** (**RN-08**) y verificación atómica de cupo contra `espacios_totales` mediante bloqueo pesimista (`select_for_update`).
 - Máquina de estados finitos (`SOLICITADA`, `CONFIRMADA`, `EN_USO`, `FINALIZADA`, `CANCELADA`, `EXPIRADA`) con matriz estricta de transiciones y permisos por rol.
-- Cálculo determinista de penalizaciones:
+- Cálculo determinista de penalizaciones y tolerancias:
+  - Tolerancia de `20` minutos en la hora de entrada (**RN-07**): si se supera el límite (`> fecha_hora_inicio + 20 min`), cancelación automática de la reserva con multa fija de `$100.00 MXN` (`10 min` entre `+10` y `+20` a `$10.00 MXN/min`).
   - Cancelación gratuita `<= 10` minutos tras creación (**RN-04**) y multa de `$100.00 MXN` posterior (**RN-05**).
   - Tolerancia de `10` minutos al término de la reserva (**RN-02**) y recargo de `$10.00 MXN` por minuto adicional (**RN-03**).
 - Endpoints de creación, listado segmentado por rol (`Próximas`/`Anteriores` para arrendatario; `Próximas llegadas`/`En uso` para arrendador), detalle con cálculo en vivo de tiempo restante/retraso, cancelación y actualización controlada de estado.
@@ -39,6 +40,8 @@ Este módulo implementa el ciclo de vida completo de las reservaciones de espaci
 | **RN-04** (Cancelación sin costo) | Si se cancela dentro de los primeros 10 minutos posteriores a la creación ($\text{ahora} - \text{fecha\_creacion} \le 10\text{ minutos}$), `monto_penalizacion = 0.00`. |
 | **RN-05** (Multa por cancelación tardía) | Si la reserva está en estado `CONFIRMADA` y se cancela después de los 10 minutos ($\text{ahora} - \text{fecha\_creacion} > 10\text{ minutos}$), `monto_penalizacion = 100.00` (`$100.00 MXN`). Si la reserva aún estaba en `SOLICITADA` (sin pago confirmado), la cancelación mantiene `monto_penalizacion = 0.00`. |
 | **RN-06** (QR de salida - punto de integración) | La transición `EN_USO -> FINALIZADA` registra `hora_salida_real` y ejecuta el cálculo de `RN-02`/`RN-03`; al integrarse el módulo de QR, esta transición será disparada tras validar el QR de salida. |
+| **RN-07** (Tolerancia de entrada y cancelación automática por llegada tardía) | Al registrar la entrada (`CONFIRMADA -> EN_USO`, tanto en `PATCH /reservas/{id}` / `start_reservation_usage` como al escanear el QR de `ENTRADA` en `POST /reservas/validar`), el arrendatario tiene una tolerancia de **20 minutos** desde su hora reservada: $\text{limite\_entrada} = \text{fecha\_hora\_inicio} + 20\text{ minutos}$ (ej. entrada reservada a las `14:00`: hasta las `14:20:00` ingresa normalmente a `EN_USO`). Si intenta ingresar después del límite ($\text{ahora} > \text{limite\_entrada}$, ej. `14:20:01` o `14:21:00`), la reservación **se cancela automáticamente** (`estado = 'CANCELADA'`) con una multa fija de **`$100.00 MXN`** (`monto_penalizacion = 100.00`), correspondiente a los 10 minutos entre `fecha_hora_inicio + 10 min` (`14:10`) y `fecha_hora_inicio + 20 min` (`14:20`) a `$10.00 MXN/min`. La cancelación y multa quedan persistidas en BD y el endpoint responde **`409 Conflict`** informando el motivo. *(Si al escanear QR de entrada ya se superó `qr.expiracion` = `fecha_hora_fin`, prevalece `410 Gone` del Módulo `04-qr-acceso`.)* |
+| **RN-08** (Una sola reservación activa por arrendatario) | Un `ARRENDATARIO` solo puede tener **1 reservación activa a la vez** (estados `'SOLICITADA'`, `'CONFIRMADA'` o `'EN_USO'`), ya sea en la misma cochera o en cualquier otra cochera distinta. Si ya posee una reservación activa e intenta crear otra (`POST /reservas`), se rechaza con **`409 Conflict`** hasta que la reservación vigente termine (`'FINALIZADA'`, `'CANCELADA'` o `'EXPIRADA'`). |
 
 ### 3.1 Reglas Complementarias de Validación Horaria y Capacidad
 1. **Cálculo de `monto_base`**:
@@ -53,16 +56,20 @@ Este módulo implementa el ciclo de vida completo de las reservaciones de espaci
 4. **Prohibición de auto-reserva y reserva en el pasado**:
    - `fecha_hora_inicio` debe ser `>= timezone.now()`.
    - El dueño de la cochera (`cochera.arrendador_id == usuario.id_usuario`) no puede reservar su propia cochera (`400 Bad Request` / `403 Forbidden`).
+5. **Unicidad de reserva activa por arrendatario (`RN-08`)**:
+   - Dentro de `transaction.atomic()`, antes de validar cupo y crear la reserva, se bloquea la fila del `Usuario` arrendatario con `select_for_update()` (para serializar peticiones concurrentes del mismo usuario) y se verifica que `Reserva.objects.filter(arrendatario=tenant, estado__in=('SOLICITADA', 'CONFIRMADA', 'EN_USO')).exists()` sea `False`. Si ya tiene una reserva activa, se rechaza con **`409 Conflict`**.
+6. **Persistencia transaccional en cancelación automática por llegada tardía (`RN-07`)**:
+   - Cuando `start_reservation_usage` (o `_execute_transition` hacia `EN_USO`) detecta `ahora > fecha_hora_inicio + 20 minutos`, la actualización a `estado = 'CANCELADA'` y `monto_penalizacion = Decimal('100.00')` debe quedar **confirmada (commit) en base de datos** antes de retornar `409 Conflict` (`ConflictError`). Ningún `transaction.atomic()` externo debe revertir dicho guardado al capturar la excepción. En `POST /reservas/validar` (QR de `ENTRADA`), el QR no se marca como `usado = True` ni se emite QR de `SALIDA`.
 
 ### 3.2 Máquina de Estados de `Reserva`
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SOLICITADA: "POST /reservas (CU-05)"
+    [*] --> SOLICITADA: "POST /reservas (CU-05 / RN-08)"
     SOLICITADA --> CONFIRMADA: "Pago aprobado"
     SOLICITADA --> CANCELADA: "Usuario cancela / Pago rechazado ($0.00)"
-    CONFIRMADA --> EN_USO: "Arrendador valida entrada"
-    CONFIRMADA --> CANCELADA: "Usuario cancela (RN-04 $0 / RN-05 $100)"
+    CONFIRMADA --> EN_USO: "Arrendador valida entrada (<= +20 min RN-07)"
+    CONFIRMADA --> CANCELADA: "Usuario cancela (RN-04/RN-05) o entrada tardía (> +20 min RN-07: $100)"
     CONFIRMADA --> EXPIRADA: "No llegó antes de fecha_hora_fin"
     EN_USO --> FINALIZADA: "Salida validada (RN-02 / RN-03)"
 ```
@@ -73,8 +80,8 @@ stateDiagram-v2
 | :--- | :--- | :--- | :--- |
 | `SOLICITADA` | `CONFIRMADA` | `ADMIN` / Servicio de Pagos | Confirma pago aprobado. |
 | `SOLICITADA` | `CANCELADA` | `ARRENDATARIO` dueño / `ADMIN` / Servicio Pagos | `monto_penalizacion = 0.00`. |
-| `CONFIRMADA` | `EN_USO` | `ARRENDADOR` dueño / `ADMIN` | Solo si `ahora <= fecha_hora_fin`. |
-| `CONFIRMADA` | `CANCELADA` | `ARRENDATARIO` dueño / `ADMIN` | Aplica `RN-04` (`<= 10 min` -> `$0.00`) o `RN-05` (`> 10 min` -> `$100.00`). |
+| `CONFIRMADA` | `EN_USO` | `ARRENDADOR` dueño / `ADMIN` | Solo si `ahora <= fecha_hora_inicio + 20 minutos` (`RN-07`) y `ahora <= fecha_hora_fin`. Si `ahora > fecha_hora_inicio + 20 minutos`, cancela automáticamente con `$100.00` y retorna `409 Conflict`. |
+| `CONFIRMADA` | `CANCELADA` | `ARRENDATARIO` dueño / `ADMIN` / Sistema (`RN-07`) | Aplica `RN-04` (`<= 10 min` -> `$0.00`), `RN-05` (`> 10 min` -> `$100.00`) o cancelación automática `RN-07` por entrada tardía (`$100.00`). |
 | `CONFIRMADA` | `EXPIRADA` | `ARRENDADOR` dueño / `ADMIN` / Sistema | Solo si `ahora > fecha_hora_fin` (no-show). |
 | `EN_USO` | `FINALIZADA` | `ARRENDADOR` dueño / `ADMIN` | Fija `hora_salida_real` (`>= fecha_hora_inicio`), calcula `RN-02`/`RN-03` y guarda `monto_penalizacion`. |
 
@@ -115,7 +122,7 @@ cochera (1) ──────< (N) reserva
 
 ### 5.1 `POST /reservas`
 - **Autenticación y Permisos**: JWT requerido (`IsAuthenticated`, `IsActiveTenant`: `rol == 'ARRENDATARIO'` y `estado_cuenta == 'ACTIVA'`).
-- **Descripción**: Crea una reserva en estado `SOLICITADA` (**CU-05**), validando cochera `APROBADA`, **RN-01**, horario de `disponibilidad` y cupo atómico disponible.
+- **Descripción**: Crea una reserva en estado `SOLICITADA` (**CU-05**), validando cochera `APROBADA`, **RN-01**, **RN-08** (que el arrendatario no tenga otra reserva activa en `SOLICITADA`, `CONFIRMADA` o `EN_USO`), horario de `disponibilidad` y cupo atómico disponible.
 
 #### Request Payload
 ```json
@@ -146,7 +153,12 @@ cochera (1) ──────< (N) reserva
 - **`400 Bad Request`**: `fecha_hora_inicio` en el pasado, violación de `RN-01` (ej. 15 min, 45 min, 25 h), horario fuera de `disponibilidad`, o intento de reservar cochera propia.
 - **`403 Forbidden`**: Usuario no es `ARRENDATARIO` o cuenta no está `ACTIVA`.
 - **`404 Not Found`**: `cochera_id` inexistente.
-- **`409 Conflict`**: La cochera no está en estado `APROBADA`, o no hay cupo disponible (`espacios_totales` saturados en ese traslape).
+- **`409 Conflict`**: La cochera no está en estado `APROBADA`, el arrendatario ya tiene una reservación activa en curso (**RN-08**), o no hay cupo disponible (`espacios_totales` saturados en ese traslape):
+```json
+{
+  "detail": "Ya cuentas con una reservación activa. Debes finalizarla o cancelarla antes de reservar otra cochera."
+}
+```
 
 ---
 
@@ -259,7 +271,7 @@ cochera (1) ──────< (N) reserva
 
 ### 5.5 `PATCH /reservas/{id}`
 - **Autenticación y Permisos**: JWT requerido (`IsAuthenticated`, sujeto a la matriz de roles por transición).
-- **Descripción**: Ejecuta una transición controlada de la máquina de estados (incluyendo cancelación con `RN-04`/`RN-05`, inicio de uso o finalización con cálculo de `RN-02`/`RN-03`).
+- **Descripción**: Ejecuta una transición controlada de la máquina de estados (incluyendo cancelación con `RN-04`/`RN-05`, inicio de uso sujeto a tolerancia de 20 min de `RN-07` o finalización con cálculo de `RN-02`/`RN-03`).
 
 #### Request Payload — Ejemplo de finalización (`EN_USO -> FINALIZADA`)
 ```json
@@ -286,7 +298,15 @@ cochera (1) ──────< (N) reserva
 ```
 - **`400 Bad Request`**: `estado` desconocido o `hora_salida_real < fecha_hora_inicio`.
 - **`403 Forbidden`**: Actor autenticado sin permiso para esa transición (ej. arrendatario intentando pasar a `CONFIRMADA`, `EN_USO` o `FINALIZADA`; arrendador intentando cancelar reserva de cliente o aprobar pago).
-- **`409 Conflict`**: Transición prohibida por la máquina de estados (ej. `SOLICITADA -> EN_USO`, `FINALIZADA -> CANCELADA`, `CONFIRMADA -> EXPIRADA` antes de `fecha_hora_fin`).
+- **`409 Conflict`**: Transición prohibida por la máquina de estados (ej. `SOLICITADA -> EN_USO`, `FINALIZADA -> CANCELADA`, `CONFIRMADA -> EXPIRADA` antes de `fecha_hora_fin`), o **llegada tardía fuera de tolerancia (`RN-07`)** al intentar pasar `CONFIRMADA -> EN_USO` después de `fecha_hora_inicio + 20 min` (evento que también aplica al escanear QR de `ENTRADA` en `POST /reservas/validar`):
+```json
+{
+  "detail": "Se excedió la tolerancia de 20 minutos para la entrada. La reservación fue cancelada automáticamente con una multa de $100.00 MXN.",
+  "error": "LateEntryCancelled",
+  "estado_reserva": "CANCELADA",
+  "monto_penalizacion": "100.00"
+}
+```
 
 ---
 
@@ -302,6 +322,8 @@ cochera (1) ──────< (N) reserva
 7. **Listados por rol y vista (`GET /reservas`)**: Arrendatario ve `proximas` y `anteriores`; Arrendador ve `proximas_llegadas` y `en_uso` exclusivamente de sus cocheras.
 8. **Detalle con cálculo en vivo (`GET /reservas/{id}`)**: Reserva `EN_USO` muestra `tiempo_restante_minutos`, `en_tolerancia` o `minutos_retraso_actual` y `recargo_estimado_actual` correctos.
 9. **Integración con `02-cocheras`**: Una reserva `CONFIRMADA`/`EN_USO` vigente reduce `espacios_disponibles_ahora` en `GET /cocheras`.
+10. **Entrada dentro de tolerancia (`RN-07`)**: Reserva `CONFIRMADA` con `fecha_hora_inicio = 14:00` registra entrada a las `14:15:00` o exactamente a las `14:20:00` (`PATCH /reservas/{id}` y `POST /reservas/validar` con QR de `ENTRADA`) -> transiciona a `EN_USO` con `monto_penalizacion = '0.00'`.
+11. **Nueva reserva tras concluir reserva previa (`RN-08`)**: Cuando la primera reserva de un arrendatario pasa a `FINALIZADA`, `CANCELADA` o `EXPIRADA`, el mismo arrendatario puede crear una nueva reserva (`201 Created`).
 
 ### 6.2 Casos de Error y Validación
 1. **Violaciones de `RN-01`**:
@@ -312,13 +334,15 @@ cochera (1) ──────< (N) reserva
 2. **Reserva en el pasado**: `fecha_hora_inicio < timezone.now()` -> `400 Bad Request`.
 3. **Cochera no aprobada**: Cochera en `PENDIENTE`, `INACTIVA` o `RECHAZADA` -> `409 Conflict`.
 4. **Fuera de horario de `disponibilidad`**: Día sin servicio o rango parcialmente fuera de `[hora_inicio, hora_fin]` -> `400 Bad Request`.
-5. **Cupo saturado**: Cochera con `espacios_totales = 2` y 2 reservas activas traslapadas en `10:00-12:00`; nueva reserva en `11:00-12:30` -> `409 Conflict`.
-6. **Auto-reserva**: Arrendador intentando reservar su propia cochera -> `400 Bad Request` / `403 Forbidden`.
-7. **Transiciones prohibidas de máquina de estados**:
+5. **Cupo saturado**: Cochera con `espacios_totales = 2` y 2 reservas activas traslapadas (de arrendatarios distintos conforme a `RN-08`) en `10:00-12:00`; un tercer arrendatario solicita reserva en `11:00-12:30` -> `409 Conflict`.
+6. **Segunda reserva activa del mismo arrendatario (`RN-08`)**: Arrendatario con una reserva vigente en `SOLICITADA`, `CONFIRMADA` o `EN_USO` intenta crear una segunda reserva (en la misma cochera o en otra cochera distinta) -> `409 Conflict`.
+7. **Llegada tardía fuera de tolerancia (`RN-07`)**: Reserva `CONFIRMADA` con `fecha_hora_inicio = 14:00` intenta registrar entrada a las `14:21:00` vía `PATCH /reservas/{id}` (`EN_USO`) o `POST /reservas/validar` (QR `ENTRADA`) -> responde `409 Conflict` (`LateEntryCancelled`), persiste en BD `estado = 'CANCELADA'` y `monto_penalizacion = Decimal('100.00')`, sin marcar el QR de `ENTRADA` como usado ni emitir QR de `SALIDA`.
+8. **Auto-reserva**: Arrendador intentando reservar su propia cochera -> `400 Bad Request` / `403 Forbidden`.
+9. **Transiciones prohibidas de máquina de estados**:
    - `SOLICITADA -> EN_USO`, `SOLICITADA -> FINALIZADA`, `CONFIRMADA -> FINALIZADA` -> `409 Conflict`.
    - Modificar reserva ya `FINALIZADA`, `CANCELADA` o `EXPIRADA` -> `409 Conflict`.
    - `CONFIRMADA -> EXPIRADA` antes de llegar a `fecha_hora_fin` -> `409 Conflict`.
-8. **Violación de permisos por rol**:
+10. **Violación de permisos por rol**:
    - `ARRENDATARIO` intenta `PATCH /reservas/{id}` hacia `CONFIRMADA`, `EN_USO` o `FINALIZADA` -> `403 Forbidden`.
    - Usuario tercero intenta `GET /reservas/{id}` o `POST /reservas/{id}/cancelar` -> `403 Forbidden`.
 
@@ -330,8 +354,13 @@ cochera (1) ──────< (N) reserva
 3. **Frontera exacta de `RN-04` / `RN-05`**:
    - Cancelación a los `10 min 00 s` exactos desde `fecha_creacion`: `0.00`.
    - Cancelación a los `10 min 01 s`: `100.00` (si estaba `CONFIRMADA`; si estaba `SOLICITADA`, `0.00`).
-4. **Reservas contiguas sin traslape**: En cochera con `espacios_totales = 1`, reserva `10:00-11:00` y reserva `11:00-12:00` **no** chocan (`201 Created`).
-5. **Reservas canceladas o expiradas liberan cupo**: Si 1 de 1 cajones tenía reserva `CANCELADA` o `EXPIRADA` en `10:00-12:00`, una nueva reserva en `10:00-12:00` sí procede (`201 Created`).
-6. **Reserva nocturna cruzando medianoche**: Reserva de `22:00` (Viernes) a `02:00` (Sábado) pasa validación si `V` cubre hasta `23:59` y `S` inicia en `00:00` hasta al menos `02:00`.
-7. **Concurrencia real en último cajón**: Dos transacciones concurrentes intentando reservar el último espacio disponible en el mismo horario solo permiten `1` éxito (`201`) y la segunda falla limpiamente (`409 Conflict`) gracias a `select_for_update()`.
-8. **Optimización ORM**: `GET /reservas` usa `select_related('cochera', 'arrendatario')` sin consultas N+1.
+4. **Frontera exacta de `RN-07` (llegada tardía)**:
+   - Entrada a `fecha_hora_inicio + 20 min 00 s` (`14:20:00`): aceptada (`EN_USO`, `monto_penalizacion = 0.00`).
+   - Entrada a `fecha_hora_inicio + 20 min 01 s` (`14:20:01`): cancelación automática persistida en BD (`estado = 'CANCELADA'`, `monto_penalizacion = 100.00`) y respuesta `409 Conflict` (y en `POST /reservas/validar` si `now > qr.expiracion` = `fecha_hora_fin`, se respeta `410 Gone`).
+5. **Reservas contiguas sin traslape**: En cochera con `espacios_totales = 1`, reserva `10:00-11:00` (arrendatario A) y reserva `11:00-12:00` (arrendatario B, o mismo arrendatario A tras concluir/cancelar la primera) **no** chocan (`201 Created`).
+6. **Reservas canceladas o expiradas liberan cupo**: Si 1 de 1 cajones tenía reserva `CANCELADA` o `EXPIRADA` en `10:00-12:00`, una nueva reserva en `10:00-12:00` sí procede (`201 Created`).
+7. **Reserva nocturna cruzando medianoche**: Reserva de `22:00` (Viernes) a `02:00` (Sábado) pasa validación si `V` cubre hasta `23:59` y `S` inicia en `00:00` hasta al menos `02:00`.
+8. **Concurrencia real en último cajón y en `RN-08`**:
+   - Dos transacciones concurrentes de **arrendatarios distintos** intentando reservar el último espacio disponible en el mismo horario solo permiten `1` éxito (`201`) y la segunda falla limpiamente (`409 Conflict`) gracias a `select_for_update()`.
+   - Dos peticiones concurrentes del **mismo arrendatario** intentando crear reservas simultáneas en cualquier cochera solo permiten `1` éxito (`201`) y la segunda falla con `409 Conflict` (`RN-08`).
+9. **Optimización ORM**: `GET /reservas` usa `select_related('cochera', 'arrendatario')` sin consultas N+1.

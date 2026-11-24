@@ -288,3 +288,48 @@ class QRAPITests(APITestCase):
         self.assertFalse(
             CodigoQR.objects.get(reserva=reservation, tipo_qr=QRCodeType.ENTRADA).usado
         )
+
+    def test_rn07_validate_entry_qr_tolerance_and_late_auto_cancellation_api(self):
+        created_at = self.start_dt - timedelta(hours=2)
+        # 1. Entry QR scanned at boundary (+20m00s) -> 200 OK
+        r1 = create_reservation(
+            self.tenant, self.garage.id_cochera, self.start_dt, self.end_dt, now=created_at
+        )
+        confirm_reservation(r1.id_reserva, by_system=True, now=created_at)
+        qr1 = CodigoQR.objects.get(reserva=r1, tipo_qr=QRCodeType.ENTRADA)
+
+        self._auth_as(self.landlord.correo)
+        with patch('django.utils.timezone.now', return_value=self.start_dt + timedelta(minutes=20)):
+            res1 = self.client.post('/reservas/validar', {'token': qr1.token_qr}, format='json')
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertEqual(res1.data['tipo_qr'], QRCodeType.ENTRADA)
+        self.assertEqual(res1.data['estado_reserva'], ReservationStatus.EN_USO)
+        self.assertTrue(res1.data['qr_salida_emitido'])
+
+        # 2. Entry QR scanned 1 second late (+20m01s) -> 409 Conflict with LateEntryCancelled payload
+        r2_start = self.start_dt + timedelta(hours=4)
+        r2_end = self.end_dt + timedelta(hours=4)
+        r2 = create_reservation(
+            self.other_tenant, self.garage.id_cochera, r2_start, r2_end, now=created_at
+        )
+        confirm_reservation(r2.id_reserva, by_system=True, now=created_at)
+        qr2 = CodigoQR.objects.get(reserva=r2, tipo_qr=QRCodeType.ENTRADA)
+
+        with patch('django.utils.timezone.now', return_value=r2_start + timedelta(minutes=20, seconds=1)):
+            res2 = self.client.post('/reservas/validar', {'token': qr2.token_qr}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(res2.data['error'], 'LateEntryCancelled')
+        self.assertEqual(res2.data['estado_reserva'], ReservationStatus.CANCELADA)
+        self.assertEqual(res2.data['monto_penalizacion'], '100.00')
+        self.assertIn('Se excedió la tolerancia de 20 minutos para la entrada', res2.data['detail'])
+
+        # DB persistence check
+        r2.refresh_from_db()
+        self.assertEqual(r2.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r2.monto_penalizacion, Decimal('100.00'))
+
+        qr2.refresh_from_db()
+        self.assertFalse(qr2.usado)
+        self.assertFalse(
+            CodigoQR.objects.filter(reserva=r2, tipo_qr=QRCodeType.SALIDA).exists()
+        )

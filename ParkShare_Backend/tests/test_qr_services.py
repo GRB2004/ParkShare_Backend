@@ -252,3 +252,77 @@ class QRServicesTests(TestCase):
         # Cross-tenant QR access -> PermissionDeniedError
         with self.assertRaises(PermissionDeniedError):
             get_active_qr_for_reservation(reservation.id_reserva, self.other_tenant)
+
+    def test_rn07_validate_scanned_entry_qr_tolerance_and_late_auto_cancellation(self):
+        # 1. Entry at exact boundary (+20m00s) -> 200 OK, transitions to EN_USO, marks QR usado, issues SALIDA QR
+        r1 = create_reservation(
+            self.tenant, self.garage.id_cochera, self.start_dt, self.end_dt, now=self.now
+        )
+        confirm_reservation(r1.id_reserva, by_system=True, now=self.now)
+        qr1 = get_active_qr_for_reservation(r1.id_reserva, self.tenant)
+
+        res1 = validate_scanned_qr(
+            qr1.token_qr,
+            self.landlord,
+            now=self.start_dt + timedelta(minutes=20),
+        )
+        self.assertEqual(res1['tipo_qr'], QRCodeType.ENTRADA)
+        self.assertEqual(res1['estado_reserva'], ReservationStatus.EN_USO)
+        self.assertTrue(res1['qr_salida_emitido'])
+
+        qr1.refresh_from_db()
+        self.assertTrue(qr1.usado)
+        r1.refresh_from_db()
+        self.assertEqual(r1.estado, ReservationStatus.EN_USO)
+        self.assertEqual(r1.monto_penalizacion, Decimal('0.00'))
+
+        # 2. Entry 1 second late (+20m01s) -> ConflictError (LateEntryCancelled), CANCELADA with 100.00, entry QR NOT used, no SALIDA QR
+        r2_start = self.start_dt + timedelta(hours=4)
+        r2_end = self.end_dt + timedelta(hours=4)
+        r2 = create_reservation(
+            self.other_tenant, self.garage.id_cochera, r2_start, r2_end, now=self.now
+        )
+        confirm_reservation(r2.id_reserva, by_system=True, now=self.now)
+        qr2 = get_active_qr_for_reservation(r2.id_reserva, self.other_tenant)
+
+        with self.assertRaises(ConflictError) as cm:
+            validate_scanned_qr(
+                qr2.token_qr,
+                self.landlord,
+                now=r2_start + timedelta(minutes=20, seconds=1),
+            )
+        self.assertEqual(cm.exception.error_code, 'LateEntryCancelled')
+        self.assertIn('Se excedió la tolerancia de 20 minutos para la entrada', str(cm.exception))
+
+        # DB persistence check
+        r2.refresh_from_db()
+        self.assertEqual(r2.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r2.monto_penalizacion, Decimal('100.00'))
+
+        qr2.refresh_from_db()
+        self.assertFalse(qr2.usado)
+        self.assertFalse(
+            CodigoQR.objects.filter(reserva=r2, tipo_qr=QRCodeType.SALIDA).exists()
+        )
+
+        # 3. Entry at +25m -> ConflictError (LateEntryCancelled)
+        r3_start = self.start_dt + timedelta(hours=8)
+        r3_end = self.end_dt + timedelta(hours=8)
+        r3 = create_reservation(
+            self.other_tenant, self.garage.id_cochera, r3_start, r3_end, now=self.now
+        )
+        confirm_reservation(r3.id_reserva, by_system=True, now=self.now)
+        qr3 = get_active_qr_for_reservation(r3.id_reserva, self.other_tenant)
+
+        with self.assertRaises(ConflictError) as cm3:
+            validate_scanned_qr(
+                qr3.token_qr,
+                self.landlord,
+                now=r3_start + timedelta(minutes=25),
+            )
+        self.assertEqual(cm3.exception.error_code, 'LateEntryCancelled')
+        r3.refresh_from_db()
+        self.assertEqual(r3.estado, ReservationStatus.CANCELADA)
+        self.assertEqual(r3.monto_penalizacion, Decimal('100.00'))
+        qr3.refresh_from_db()
+        self.assertFalse(qr3.usado)

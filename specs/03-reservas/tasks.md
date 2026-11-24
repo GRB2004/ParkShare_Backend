@@ -75,3 +75,37 @@
     - Integridad de la máquina de estados y control de acceso por rol en cada transición.
     - Concurrencia segura en creación de reservas y ausencia de consultas N+1.
     - Código en inglés, mensajes al usuario en español y diccionario de datos exacto.
+
+---
+
+## Fase 5: Implementación TDD de Nuevas Reglas de Negocio RN-07 y RN-08
+
+- [x] **03.5.1 (Rojo) Tests unitarios de servicios para RN-07 y RN-08**
+  - Actualizar y ampliar `ParkShare_Backend/tests/test_reservas_services.py` y `ParkShare_Backend/tests/test_qr_services.py` cubriendo:
+    - **RN-07**: Entrada dentro de tolerancia (`<= fecha_hora_inicio + 20 min`, frontera `20 min 00 s`) transiciona a `EN_USO`; entrada tardía (`>= 20 min 01 s`, ej. `14:21` para inicio `14:00`) lanza `ConflictError` (`LateEntryCancelled`), persiste en BD `estado='CANCELADA'` y `monto_penalizacion=Decimal('100.00')` sin revertirse por rollback, y en `qr_service.validate_scanned_qr` (`ENTRADA`) no marca `usado=True` ni emite QR de `SALIDA`.
+    - **RN-08**: Rechaza con `ConflictError` la creación de una segunda reserva por el mismo arrendatario si tiene otra en `SOLICITADA`, `CONFIRMADA` o `EN_USO` (en la misma o distinta cochera), permite nueva reserva cuando la previa está en `FINALIZADA`/`CANCELADA`/`EXPIRADA`, y actualiza escenarios previos de traslape/concurrencia de cupo para usar un segundo arrendatario.
+  - Ejecutar `python manage.py test` y comprobar fallo inicial en los casos nuevos/actualizados (fase **Roja**).
+
+- [x] **03.5.2 (Verde + Refactor) Implementar RN-07 y RN-08 en `reserva_service.py` y `qr_service.py`**
+  - En `ParkShare_Backend/services/reserva_service.py`:
+    - Bloquear al usuario arrendatario con `select_for_update()` en `create_reservation` y validar unicidad de reserva activa (`SOLICITADA`, `CONFIRMADA`, `EN_USO`) conforme a `RN-08` (lanzando `ConflictError`).
+    - Aplicar tolerancia de `20` minutos (`ENTRY_TOLERANCE_MINUTES = 20`) y multa fija de `$100.00 MXN` (`LATE_ENTRY_PENALTY = Decimal('100.00')`) en la transición `CONFIRMADA -> EN_USO` (`_execute_transition` / `start_reservation_usage`), confirmando en BD `estado='CANCELADA'` y `monto_penalizacion=100.00` antes de elevar `ConflictError(error_code='LateEntryCancelled')`.
+  - En `ParkShare_Backend/services/qr_service.py`:
+    - Ajustar `validate_scanned_qr` (caso `ENTRADA`) para evaluar `RN-07` antes de consumir `qr.usado = True` y sin envolver la cancelación automática en un bloque atómico que la revierta al propagar `ConflictError`.
+  - Ejecutar `test_reservas_services.py` y `test_qr_services.py` confirmando 100% en verde (fase **Verde**).
+
+- [x] **03.5.3 (Rojo) Tests de integración API para RN-07 y RN-08**
+  - Actualizar y ampliar `ParkShare_Backend/tests/test_reservas_api.py` y `ParkShare_Backend/tests/test_qr_api.py` cubriendo:
+    - `POST /reservas` retornando `409 Conflict` ante segunda reserva activa del mismo arrendatario (`RN-08`) y concurrencia con el mismo arrendatario vs arrendatarios distintos para cupo.
+    - `PATCH /reservas/{id}` (`CONFIRMADA -> EN_USO`) y `POST /reservas/validar` (QR `ENTRADA`) dentro de `+20 min 00 s` (`200 OK`) y tras `+20 min 01 s` (`409 Conflict`, verificando con `refresh_from_db()` que `estado=='CANCELADA'` y `monto_penalizacion==Decimal('100.00')` quedaron guardados en BD, y en QR que `usado==False`).
+  - Ejecutar `python manage.py test` y comprobar fallo inicial si faltan ajustes REST (fase **Roja**).
+
+- [x] **03.5.4 (Verde + Refactor) Ajustar vistas/respuestas REST para RN-07 y RN-08 y validar suite completa**
+  - Ajustar `handle_domain_exception` / `ConflictError` (si se requiere incluir `estado_reserva` y `monto_penalizacion` o metadatos de `LateEntryCancelled` en la respuesta `409`) y verificar respuestas limpias en `reserva_views.py` y `qr_views.py`.
+  - Ejecutar `python manage.py test` completo en todos los módulos y confirmar 100% de tests en verde y 0 migraciones pendientes (`python manage.py makemigrations --check --dry-run`).
+
+- [x] **03.5.5 Auditoría de RN-07 y RN-08 por el agente `Reviewer`**
+  - Entregar al **Reviewer** para auditar:
+    - Cumplimiento estricto de `RN-07` (tolerancia `20 min`, frontera `20m00s` vs `20m01s`, persistencia real de `CANCELADA` + `$100.00` ante `409`, sin consumo del QR de entrada).
+    - Cumplimiento estricto de `RN-08` (máximo 1 reserva activa simultánea por arrendatario con bloqueo de concurrencia).
+    - Ejecución limpia de toda la suite (`python manage.py test`), idioma y ausencia de consultas N+1.

@@ -47,8 +47,10 @@ MIN_DURATION_SECONDS = 1800
 MAX_DURATION_SECONDS = 86400
 DURATION_STEP_SECONDS = 1800
 TOLERANCE_MINUTES = 10
+ENTRY_TOLERANCE_MINUTES = 20
 LATE_FEE_PER_MINUTE = Decimal('10.00')
 LATE_CANCEL_PENALTY = Decimal('100.00')
+LATE_ENTRY_PENALTY = Decimal('100.00')
 END_OF_DAY_MIN_TIME = time(23, 59, 0)
 
 ALLOWED_TRANSITIONS = {
@@ -243,6 +245,14 @@ def create_reservation(
         )
 
     with transaction.atomic():
+        # RN-08: A tenant can have at most 1 active reservation across all garages
+        Usuario.objects.select_for_update().filter(id_usuario=tenant.id_usuario).first()
+        if Reserva.objects.filter(arrendatario=tenant, estado__in=ACTIVE_RESERVATION_STATUSES).exists():
+            raise ConflictError(
+                'Ya cuentas con una reservación activa. Debes finalizarla o cancelarla antes de reservar otra cochera.',
+                error_code='ActiveReservationExists',
+            )
+
         garage = (
             Cochera.objects.select_for_update()
             .prefetch_related('disponibilidades')
@@ -330,6 +340,7 @@ def _execute_transition(
 
     reference_now = _ensure_aware_dt(now) if now is not None else timezone.now()
     late_cancel_applied = False
+    late_entry_cancelled = False
 
     with transaction.atomic():
         reservation = (
@@ -365,7 +376,13 @@ def _execute_transition(
 
         update_fields = ['estado']
         if target_status == ReservationStatus.EN_USO:
-            if reference_now > reservation.fecha_hora_fin:
+            entry_limit = reservation.fecha_hora_inicio + timedelta(minutes=ENTRY_TOLERANCE_MINUTES)
+            if reference_now > entry_limit:
+                reservation.estado = ReservationStatus.CANCELADA
+                reservation.monto_penalizacion = LATE_ENTRY_PENALTY
+                update_fields = ['estado', 'monto_penalizacion']
+                late_entry_cancelled = True
+            elif reference_now > reservation.fecha_hora_fin:
                 raise ConflictError('La ventana de llegada para esta reservación ha expirado.')
         elif target_status == ReservationStatus.EXPIRADA:
             if reference_now <= reservation.fecha_hora_fin:
@@ -400,13 +417,24 @@ def _execute_transition(
             reservation.monto_penalizacion = surcharge
             update_fields.extend(['hora_salida_real', 'monto_penalizacion'])
 
-        reservation.estado = target_status
+        if not late_entry_cancelled:
+            reservation.estado = target_status
         reservation.save(update_fields=update_fields)
 
-        if target_status == ReservationStatus.CONFIRMADA:
+        if not late_entry_cancelled and target_status == ReservationStatus.CONFIRMADA:
             from ParkShare_Backend.services.qr_service import issue_entry_qr
 
             issue_entry_qr(reservation, now=reference_now)
+
+    if late_entry_cancelled:
+        raise ConflictError(
+            'Se excedió la tolerancia de 20 minutos para la entrada. La reservación fue cancelada automáticamente con una multa de $100.00 MXN.',
+            error_code='LateEntryCancelled',
+            extra_data={
+                'estado_reserva': ReservationStatus.CANCELADA,
+                'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
+            },
+        )
 
     return reservation, late_cancel_applied
 
