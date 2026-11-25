@@ -50,7 +50,11 @@ class AdminLandlordRequestListView(APIView):
 
         paginator = StandardPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
-        serializer = LandlordRequestListSerializer(page, many=True)
+        serializer = LandlordRequestListSerializer(
+            page,
+            many=True,
+            context={'request': request},
+        )
         return paginator.get_paginated_response(serializer.data)
 
 
@@ -71,7 +75,10 @@ class AdminLandlordRequestDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        return Response(LandlordRequestDetailSerializer(document).data, status=status.HTTP_200_OK)
+        return Response(
+            LandlordRequestDetailSerializer(document, context={'request': request}).data,
+            status=status.HTTP_200_OK,
+        )
 
     def patch(self, request, pk: int):
         serializer = ReviewLandlordRequestSerializer(data=request.data)

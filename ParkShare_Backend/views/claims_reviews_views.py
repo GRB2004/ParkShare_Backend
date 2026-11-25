@@ -1,5 +1,6 @@
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,9 +22,12 @@ from ParkShare_Backend.services.auth_service import (
     DomainValidationError,
     NotFoundError,
     PermissionDeniedError,
+    delete_saved_attachment_by_url,
+    save_uploaded_attachment,
 )
 from ParkShare_Backend.services.claim_sanction_service import (
     create_complaint,
+    get_admin_appeal_detail,
     get_admin_complaint_detail,
     get_landlord_sanction_detail,
     list_admin_claims_and_appeals,
@@ -108,6 +112,15 @@ class ComplaintCreateView(APIView):
             return handle_domain_exception(exc)
 
 
+def _resolve_evidence_url(request, raw_url: str | None) -> str | None:
+    cleaned = (raw_url or '').strip()
+    if not cleaned:
+        return None
+    if request is not None and cleaned.startswith('/'):
+        return request.build_absolute_uri(cleaned)
+    return cleaned
+
+
 class AdminClaimAppealListView(APIView):
     """GET /admin/quejas — List pending complaints and appeals under review (CU-13)."""
 
@@ -124,6 +137,9 @@ class AdminClaimAppealListView(APIView):
                 _format_iso_fields(item, ('fecha_creacion',))
             for item in result.get('apelaciones_en_revision', []):
                 _format_iso_fields(item, ('fecha_creacion',))
+                item['archivo_evidencia_url'] = _resolve_evidence_url(
+                    request, item.get('url_evidencia')
+                )
             return Response(result, status=status.HTTP_200_OK)
         except (DomainValidationError, PermissionDeniedError) as exc:
             return handle_domain_exception(exc)
@@ -210,13 +226,35 @@ class SanctionAppealCreateView(APIView):
     """POST /sanciones/{id}/apelar — Submit an appeal for a VIGENTE sanction (CU-13)."""
 
     permission_classes = [IsAuthenticated, IsActiveAccount]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request, pk: int):
-        serializer = SubmitAppealInputSerializer(data=request.data)
-        if not serializer.is_valid():
-            return validation_error_response(serializer.errors)
+        file_aliases = ('archivo_evidencia', 'evidencia', 'archivo', 'url_evidencia')
+        excluded_keys = {'archivo_evidencia', 'evidencia', 'archivo'}
+        payload = {
+            key: val
+            for key, val in request.data.items()
+            if key not in excluded_keys and not hasattr(val, 'read')
+        }
 
+        saved_evidence_url: str | None = None
         try:
+            uploaded_file = None
+            for alias in file_aliases:
+                if alias in request.FILES:
+                    uploaded_file = request.FILES[alias]
+                    break
+            if uploaded_file is not None:
+                saved_info = save_uploaded_attachment(uploaded_file, folder='evidencias')
+                saved_evidence_url = saved_info['url']
+                payload['url_evidencia'] = saved_evidence_url
+
+            serializer = SubmitAppealInputSerializer(data=payload)
+            if not serializer.is_valid():
+                if saved_evidence_url:
+                    delete_saved_attachment_by_url(saved_evidence_url)
+                return validation_error_response(serializer.errors)
+
             result = submit_appeal(
                 sanction_id=pk,
                 host_user=request.user,
@@ -224,6 +262,9 @@ class SanctionAppealCreateView(APIView):
                 url_evidencia=serializer.validated_data.get('url_evidencia'),
             )
             _format_iso_fields(result, ('fecha_creacion',))
+            result['archivo_evidencia_url'] = _resolve_evidence_url(
+                request, result.get('url_evidencia')
+            )
             return Response(result, status=status.HTTP_201_CREATED)
         except (
             DomainValidationError,
@@ -231,13 +272,32 @@ class SanctionAppealCreateView(APIView):
             NotFoundError,
             ConflictError,
         ) as exc:
+            if saved_evidence_url:
+                delete_saved_attachment_by_url(saved_evidence_url)
             return handle_domain_exception(exc)
+        except Exception:
+            if saved_evidence_url:
+                delete_saved_attachment_by_url(saved_evidence_url)
+            raise
 
 
 class AdminAppealResolveView(APIView):
-    """PATCH /admin/apelaciones/{id} — Accept or reject a landlord's sanction appeal (CU-13)."""
+    """GET/PATCH /admin/apelaciones/{id} — Inspect and resolve a landlord's sanction appeal (CU-13)."""
 
     permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def get(self, request, pk: int):
+        try:
+            result = get_admin_appeal_detail(appeal_id=pk, admin_user=request.user)
+            _format_iso_fields(result, ('fecha_creacion',))
+            if isinstance(result.get('sancion'), dict):
+                _format_iso_fields(result['sancion'], ('fecha_creacion',))
+            result['archivo_evidencia_url'] = _resolve_evidence_url(
+                request, result.get('url_evidencia')
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except (PermissionDeniedError, NotFoundError) as exc:
+            return handle_domain_exception(exc)
 
     def patch(self, request, pk: int):
         serializer = ResolveAppealInputSerializer(data=request.data)

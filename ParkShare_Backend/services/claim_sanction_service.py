@@ -503,6 +503,43 @@ def submit_appeal(
         }
 
 
+def get_admin_appeal_detail(appeal_id: int, admin_user: Usuario) -> dict:
+    """Return full appeal detail and attached evidence URL for admin inspection (GET /admin/apelaciones/{id})."""
+    _check_active_admin(admin_user)
+
+    appeal = (
+        Apelacion.objects.select_related('sancion__arrendador', 'sancion__queja')
+        .filter(id_apelacion=appeal_id)
+        .first()
+    )
+    if appeal is None:
+        raise NotFoundError('Apelación no encontrada.')
+
+    sanction = appeal.sancion
+    landlord = sanction.arrendador
+    return {
+        'id_apelacion': appeal.id_apelacion,
+        'sancion_id': sanction.id_sancion,
+        'descripcion': appeal.descripcion,
+        'url_evidencia': appeal.url_evidencia,
+        'estado': appeal.estado,
+        'fecha_creacion': appeal.fecha_creacion,
+        'arrendador': {
+            'id_usuario': landlord.id_usuario,
+            'nombre_completo': landlord.nombre_completo,
+            'correo': landlord.correo,
+            'telefono': landlord.telefono,
+        },
+        'sancion': {
+            'id_sancion': sanction.id_sancion,
+            'queja_id': sanction.queja_id,
+            'motivo': sanction.motivo,
+            'estado': sanction.estado,
+            'fecha_creacion': sanction.fecha_creacion,
+        },
+    }
+
+
 def resolve_appeal(
     appeal_id: int,
     admin_user: Usuario,

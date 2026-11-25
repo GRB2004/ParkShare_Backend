@@ -1,5 +1,9 @@
+import mimetypes
+
+from django.http import FileResponse
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,8 +24,19 @@ from ParkShare_Backend.services.auth_service import (
     NotFoundError,
     PermissionDeniedError,
     authenticate_user,
+    delete_saved_attachment_by_url,
     register_user,
+    resolve_media_file_path,
+    save_uploaded_attachment,
 )
+
+EXPLICIT_CONTENT_TYPES: dict[str, str] = {
+    '.pdf': 'application/pdf',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+}
 
 
 class StandardPagination(PageNumberPagination):
@@ -88,16 +103,55 @@ class RegisterView(APIView):
     """Public user registration endpoint (`POST /auth/registro`)."""
 
     permission_classes = [AllowAny]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
-        if not serializer.is_valid():
-            return validation_error_response(serializer.errors)
+        file_field_mappings = (
+            ('url_ine', ('archivo_ine', 'ine', 'url_ine'), ('.pdf', '.jpg', '.jpeg', '.png')),
+            ('url_csf', ('archivo_csf', 'csf', 'url_csf'), ('.pdf',)),
+            ('url_propiedad', ('archivo_propiedad', 'propiedad', 'url_propiedad'), ('.pdf',)),
+        )
+        excluded_file_keys = {
+            alias for _, aliases, _ in file_field_mappings for alias in aliases if alias not in ('url_ine', 'url_csf', 'url_propiedad')
+        }
+        payload = {
+            key: val
+            for key, val in request.data.items()
+            if key not in excluded_file_keys and not hasattr(val, 'read')
+        }
 
+        saved_urls: list[str] = []
         try:
+            for target_key, aliases, allowed_exts in file_field_mappings:
+                uploaded = None
+                for alias in aliases:
+                    if alias in request.FILES:
+                        uploaded = request.FILES[alias]
+                        break
+                if uploaded is not None:
+                    saved_info = save_uploaded_attachment(
+                        uploaded,
+                        folder='docs',
+                        allowed_extensions_override=allowed_exts,
+                    )
+                    saved_urls.append(saved_info['url'])
+                    payload[target_key] = saved_info['url']
+
+            serializer = RegisterSerializer(data=payload)
+            if not serializer.is_valid():
+                for url in saved_urls:
+                    delete_saved_attachment_by_url(url)
+                return validation_error_response(serializer.errors)
+
             result = register_user(serializer.validated_data)
         except (DomainValidationError, ConflictError) as exc:
+            for url in saved_urls:
+                delete_saved_attachment_by_url(url)
             return handle_domain_exception(exc)
+        except Exception:
+            for url in saved_urls:
+                delete_saved_attachment_by_url(url)
+            raise
 
         user = result['usuario']
         document = result['documento']
@@ -118,6 +172,50 @@ class RegisterView(APIView):
                 'usuario': serialize_registered_user(user),
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class AttachmentUploadView(APIView):
+    """Upload physical attachment files (`POST /archivos/subir`) for landlord registration or appeals."""
+
+    permission_classes = [AllowAny]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        uploaded_file = request.FILES.get('archivo') or request.FILES.get('file')
+        folder = request.data.get('carpeta', 'docs')
+        try:
+            info = save_uploaded_attachment(uploaded_file=uploaded_file, folder=folder)
+        except DomainValidationError as exc:
+            return handle_domain_exception(exc)
+
+        info['archivo_url'] = request.build_absolute_uri(info['url'])
+        return Response(info, status=status.HTTP_201_CREATED)
+
+
+class MediaAttachmentServeView(APIView):
+    """Serve stored attachment files under `/media/<subpath>` safely."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, subpath: str):
+        try:
+            file_path = resolve_media_file_path(subpath)
+        except NotFoundError as exc:
+            return handle_domain_exception(exc)
+
+        ext = file_path.suffix.lower()
+        content_type = EXPLICIT_CONTENT_TYPES.get(ext)
+        if not content_type:
+            guessed, _ = mimetypes.guess_type(str(file_path))
+            content_type = guessed or 'application/octet-stream'
+
+        return FileResponse(
+            open(file_path, 'rb'),
+            content_type=content_type,
+            as_attachment=False,
+            filename=file_path.name,
         )
 
 

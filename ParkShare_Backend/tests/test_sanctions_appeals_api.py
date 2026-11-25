@@ -1,8 +1,11 @@
 from datetime import date, datetime, time
 from decimal import Decimal
+import tempfile
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -349,3 +352,118 @@ class SanctionsAndAppealsAPITests(APITestCase):
             ).status_code,
             status.HTTP_409_CONFLICT,
         )
+
+    def test_appeal_attachment_upload_and_admin_inspection_serves_saved_evidence(self):
+        c1 = Queja.objects.create(
+            reserva=self.reservation,
+            arrendatario=self.tenant,
+            arrendador=self.landlord,
+            motivo_categoria=ComplaintReasonCategory.NO_PUDE_ACCEDER,
+            descripcion='No se abrió el portón automático al llegar a la cochera.',
+            estado=ComplaintStatus.REVISADA,
+        )
+        s1 = Sancion.objects.create(
+            queja=c1,
+            arrendador=self.landlord,
+            admin=self.admin,
+            motivo='Falta de acceso reportada.',
+            estado=SanctionStatus.VIGENTE,
+        )
+        c2 = Queja.objects.create(
+            reserva=self.reservation,
+            arrendatario=self.tenant,
+            arrendador=self.landlord,
+            motivo_categoria=ComplaintReasonCategory.OTRO,
+            descripcion='Incidencia en el interfón secundario.',
+            estado=ComplaintStatus.REVISADA,
+        )
+        s2 = Sancion.objects.create(
+            queja=c2,
+            arrendador=self.landlord,
+            admin=self.admin,
+            motivo='Incidencia de acceso secundario.',
+            estado=SanctionStatus.VIGENTE,
+        )
+
+        pdf_bytes = b'%PDF-1.4\n%REPORTE-CFE-EVIDENCIA\n%%EOF'
+        png_bytes = b'\x89PNG\r\n\x1a\nEVIDENCIA-PORTON'
+
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(MEDIA_ROOT=tmp_media, MEDIA_URL='/media/'):
+                self._auth_as(self.landlord.correo)
+
+                # Flow 1: 2-step upload via POST /archivos/subir + POST /sanciones/{id}/apelar
+                upload_res = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': 'evidencias',
+                        'archivo': SimpleUploadedFile(
+                            'Reporte CFE Colonia.pdf',
+                            pdf_bytes,
+                            content_type='application/pdf',
+                        ),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(upload_res.status_code, status.HTTP_201_CREATED)
+                self.assertTrue(upload_res.data['url'].startswith('/media/evidencias/'))
+                self.assertTrue(upload_res.data['url'].endswith('.pdf'))
+
+                ap1_res = self.client.post(
+                    f'/sanciones/{s1.id_sancion}/apelar',
+                    {
+                        'descripcion': 'Adjunto reporte oficial de corte eléctrico de CFE en la cuadra.',
+                        'url_evidencia': upload_res.data['url'],
+                    },
+                    format='json',
+                )
+                self.assertEqual(ap1_res.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(ap1_res.data['url_evidencia'], upload_res.data['url'])
+                ap1_id = ap1_res.data['id_apelacion']
+
+                # Flow 2: Direct multipart file upload on POST /sanciones/{id}/apelar
+                ap2_res = self.client.post(
+                    f'/api/v1/sanciones/{s2.id_sancion}/apelar',
+                    {
+                        'descripcion': 'Adjunto fotografía de la bitácora del interfón funcionando.',
+                        'archivo_evidencia': SimpleUploadedFile(
+                            'bitacora_interfon.png',
+                            png_bytes,
+                            content_type='image/png',
+                        ),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(ap2_res.status_code, status.HTTP_201_CREATED)
+                self.assertTrue(ap2_res.data['url_evidencia'].startswith('/media/evidencias/'))
+                self.assertTrue(ap2_res.data['url_evidencia'].endswith('.png'))
+                ap2_id = ap2_res.data['id_apelacion']
+
+                # Admin inspects inbox (still 3 constant queries!) and individual appeal detail + downloads evidence
+                self._auth_as(self.admin.correo)
+                with self.assertNumQueries(3):
+                    inbox_res = self.client.get('/admin/quejas')
+                self.assertEqual(inbox_res.status_code, status.HTTP_200_OK)
+                self.assertEqual(inbox_res.data['totales']['apelaciones'], 2)
+                inbox_urls = {
+                    a['id_apelacion']: a['url_evidencia']
+                    for a in inbox_res.data['apelaciones_en_revision']
+                }
+                self.assertEqual(inbox_urls[ap1_id], upload_res.data['url'])
+                self.assertEqual(inbox_urls[ap2_id], ap2_res.data['url_evidencia'])
+
+                ap1_detail = self.client.get(f'/admin/apelaciones/{ap1_id}')
+                self.assertEqual(ap1_detail.status_code, status.HTTP_200_OK)
+                self.assertEqual(ap1_detail.data['url_evidencia'], upload_res.data['url'])
+                self.assertIn('archivo_evidencia_url', ap1_detail.data)
+                self.assertEqual(ap1_detail.data['arrendador']['correo'], self.landlord.correo)
+
+                dl_pdf = self.client.get(ap1_detail.data['url_evidencia'])
+                self.assertEqual(dl_pdf.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(dl_pdf.streaming_content), pdf_bytes)
+                self.assertIn('application/pdf', dl_pdf['Content-Type'])
+
+                dl_png = self.client.get(ap2_res.data['url_evidencia'])
+                self.assertEqual(dl_png.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(dl_png.streaming_content), png_bytes)
+                self.assertIn('image/png', dl_png['Content-Type'])

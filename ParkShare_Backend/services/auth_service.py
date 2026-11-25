@@ -1,5 +1,13 @@
+import os
+from pathlib import Path
+import re
+import unicodedata
+import uuid
+
+from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.storage import FileSystemStorage
 from django.db import transaction
 from django.utils import timezone
 
@@ -20,6 +28,20 @@ REJECTION_REASON_CATALOG = (
     'Datos no coinciden',
     'Otro',
 )
+
+MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024
+FOLDER_ALLOWED_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    'docs': ('.pdf', '.jpg', '.jpeg', '.png'),
+    'evidencias': ('.pdf', '.jpg', '.jpeg', '.png', '.webp'),
+    'cocheras': ('.jpg', '.jpeg', '.png', '.webp'),
+}
+MIME_EXTENSION_MAP: dict[str, str] = {
+    'application/pdf': '.pdf',
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+}
 
 
 class DomainValidationError(Exception):
@@ -338,3 +360,107 @@ def suspend_account(target_user_id: int, admin_user: Usuario, reason: str) -> Su
         target_user.save(update_fields=['estado_cuenta', 'token_version', 'is_active'])
 
     return suspension
+
+
+def save_uploaded_attachment(
+    uploaded_file,
+    folder: str = 'docs',
+    allowed_extensions_override: tuple[str, ...] | None = None,
+) -> dict:
+    """Validate, sanitize, and persist an uploaded attachment under MEDIA_ROOT/<folder>/."""
+    if uploaded_file is None or not hasattr(uploaded_file, 'read'):
+        raise DomainValidationError(
+            'Debes adjuntar un archivo válido.',
+            errors={'archivo': ['El archivo adjunto es obligatorio.']},
+        )
+
+    normalized_folder = (folder or 'docs').strip().lower() if isinstance(folder, str) else ''
+    if normalized_folder not in FOLDER_ALLOWED_EXTENSIONS:
+        raise DomainValidationError(
+            'La carpeta de destino solicitada no es válida.',
+            errors={'carpeta': [f'Valores permitidos: {", ".join(FOLDER_ALLOWED_EXTENSIONS.keys())}.']},
+        )
+
+    file_size = getattr(uploaded_file, 'size', None)
+    if file_size is None or file_size <= 0:
+        raise DomainValidationError(
+            'El archivo adjunto está vacío.',
+            errors={'archivo': ['Selecciona un archivo con contenido válido.']},
+        )
+    if file_size > MAX_ATTACHMENT_SIZE_BYTES:
+        raise DomainValidationError(
+            'El archivo adjunto supera el tamaño máximo permitido de 10 MB.',
+            errors={'archivo': ['El tamaño máximo permitido por archivo es de 10 MB.']},
+        )
+
+    original_name = os.path.basename(str(getattr(uploaded_file, 'name', '') or '').strip())
+    raw_base, raw_ext = os.path.splitext(original_name)
+    ext = raw_ext.lower()
+    if not ext:
+        content_type = str(getattr(uploaded_file, 'content_type', '') or '').strip().lower()
+        ext = MIME_EXTENSION_MAP.get(content_type, '')
+
+    allowed_exts = allowed_extensions_override or FOLDER_ALLOWED_EXTENSIONS[normalized_folder]
+    if ext not in allowed_exts:
+        allowed_str = ', '.join(allowed_exts)
+        raise DomainValidationError(
+            f'Formato de archivo no permitido. Extensiones válidas: {allowed_str}.',
+            errors={'archivo': [f'Extensiones permitidas: {allowed_str}.']},
+        )
+
+    ascii_base = (
+        unicodedata.normalize('NFKD', raw_base or 'archivo')
+        .encode('ascii', 'ignore')
+        .decode('ascii')
+    )
+    safe_base = re.sub(r'[^A-Za-z0-9_-]+', '_', ascii_base).strip('_')[:50] or 'archivo'
+    unique_filename = f'{uuid.uuid4().hex[:12]}_{safe_base}{ext}'
+
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    target_dir = (media_root / normalized_folder).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    storage = FileSystemStorage(location=str(target_dir))
+    saved_name = storage.save(unique_filename, uploaded_file)
+
+    media_prefix = (getattr(settings, 'MEDIA_URL', '/media/') or '/media/').rstrip('/')
+    if not media_prefix.startswith('/'):
+        media_prefix = f'/{media_prefix}'
+    relative_url = f'{media_prefix}/{normalized_folder}/{saved_name}'
+
+    return {
+        'mensaje': 'Archivo subido exitosamente.',
+        'url': relative_url,
+        'url_archivo': relative_url,
+        'nombre_archivo': saved_name,
+        'carpeta': normalized_folder,
+        'tamano_bytes': file_size,
+    }
+
+
+def resolve_media_file_path(subpath: str) -> Path:
+    """Safely resolve a relative subpath inside MEDIA_ROOT preventing directory traversal."""
+    cleaned = (subpath or '').strip().lstrip('/\\')
+    if not cleaned or '\x00' in cleaned:
+        raise NotFoundError('Archivo adjunto no encontrado.')
+
+    media_root = Path(settings.MEDIA_ROOT).resolve()
+    candidate = (media_root / cleaned).resolve()
+    if not candidate.is_relative_to(media_root) or not candidate.is_file():
+        raise NotFoundError('Archivo adjunto no encontrado.')
+
+    return candidate
+
+
+def delete_saved_attachment_by_url(relative_url: str | None) -> None:
+    """Remove a saved file inside MEDIA_ROOT if a composite request fails validation."""
+    cleaned = (relative_url or '').strip()
+    media_prefix = (getattr(settings, 'MEDIA_URL', '/media/') or '/media/').rstrip('/') + '/'
+    if not cleaned.startswith(media_prefix):
+        return
+    subpath = cleaned[len(media_prefix):]
+    try:
+        path = resolve_media_file_path(subpath)
+        path.unlink(missing_ok=True)
+    except (NotFoundError, OSError):
+        return

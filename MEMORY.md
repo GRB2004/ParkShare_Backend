@@ -11,6 +11,7 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - **Módulo `04-qr-acceso` implementado, probado y APROBADO por `Reviewer`** (incluyendo Fase 5 con `GET/POST /reservas/simular-qr` y enriquecimiento de `GET /reservas/{id}/qr`; 17 tests en verde).
 - **Módulo `05-pagos-cobros` implementado, probado y APROBADO por `Reviewer`** (13 tests en verde).
 - **Módulo `06-quejas-sanciones-resenas` implementado, probado y APROBADO por `Reviewer`** (10 tests nuevos; 121/121 tests totales en verde, sin migraciones pendientes).
+- **Subida, persistencia y entrega de adjuntos (`docs` y `evidencias`) implementada y probada** (124/124 tests totales en verde, sin migraciones pendientes): `POST /archivos/subir`, soporte directo `multipart/form-data` en `POST /auth/registro` y `POST /sanciones/{id}/apelar`, servicio seguro `/media/<subpath>` y entrega de URLs/metadatos al `ADMIN` en `GET /admin/solicitudes`, `GET /admin/solicitudes/{id}`, `GET /admin/quejas` y `GET /admin/apelaciones/{id}`.
 
 ## Decisiones (y por qué)
 - **Alineación con la Constitución**: Lógica de negocio en backend Django/DRF, código en inglés, mensajes/documentación en español, TDD obligatorio.
@@ -30,4 +31,4 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - Nunca ejecutar dos corridas paralelas de `manage.py test` sobre MySQL `test_parkshare_db` al mismo tiempo para evitar deadlocks.
 
 ## Próximos pasos
-- Los 6 módulos de backend (`01-auth` a `06-quejas-sanciones-resenas`) están implementados, probados (121/121 tests en verde) y aprobados por `Reviewer`.
+- Los 6 módulos de backend (`01-auth` a `06-quejas-sanciones-resenas`) y el flujo completo de adjuntos para solicitudes de arrendador y apelaciones están implementados y probados (124/124 tests en verde).

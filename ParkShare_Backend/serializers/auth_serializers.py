@@ -71,6 +71,21 @@ class LandlordInRequestSerializer(serializers.ModelSerializer):
         ]
 
 
+def _build_attachment_info(request, raw_url: str | None) -> dict | None:
+    cleaned = (raw_url or '').strip()
+    if not cleaned:
+        return None
+    absolute_url = (
+        request.build_absolute_uri(cleaned)
+        if request is not None and cleaned.startswith('/')
+        else cleaned
+    )
+    return {
+        'url': cleaned,
+        'archivo_url': absolute_url,
+    }
+
+
 class LandlordRequestListSerializer(serializers.ModelSerializer):
     arrendador = LandlordInRequestSerializer(read_only=True)
 
@@ -79,6 +94,9 @@ class LandlordRequestListSerializer(serializers.ModelSerializer):
         fields = [
             'id_documento',
             'estado_verificacion',
+            'url_ine',
+            'url_csf',
+            'url_propiedad',
             'arrendador',
         ]
 
@@ -99,6 +117,7 @@ class LandlordDetailInRequestSerializer(serializers.ModelSerializer):
 
 class LandlordRequestDetailSerializer(serializers.ModelSerializer):
     arrendador = LandlordDetailInRequestSerializer(read_only=True)
+    documentos_adjuntos = serializers.SerializerMethodField()
 
     class Meta:
         model = DocumentoArrendador
@@ -109,8 +128,17 @@ class LandlordRequestDetailSerializer(serializers.ModelSerializer):
             'url_ine',
             'url_csf',
             'url_propiedad',
+            'documentos_adjuntos',
             'arrendador',
         ]
+
+    def get_documentos_adjuntos(self, obj: DocumentoArrendador) -> dict:
+        request = self.context.get('request')
+        return {
+            'ine': _build_attachment_info(request, obj.url_ine),
+            'csf': _build_attachment_info(request, obj.url_csf),
+            'propiedad': _build_attachment_info(request, obj.url_propiedad),
+        }
 
 
 class ReviewLandlordRequestSerializer(serializers.Serializer):

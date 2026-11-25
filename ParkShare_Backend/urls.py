@@ -27,6 +27,7 @@ from .views import (
     LandlordSanctionDetailView,
     LandlordSanctionListView,
     LoginView,
+    MediaAttachmentServeView,
     ProcessPaymentView,
     RegisterView,
     ReservationCancelView,
@@ -37,12 +38,23 @@ from .views import (
     SanctionAppealCreateView,
     SimulateQRView,
     ValidateQRView,
+    AttachmentUploadView,
     home_view,
 )
 
 
 def get_api_urlpatterns(name_prefix: str = ''):
     return [
+        re_path(
+            r'^archivos/subir/?$',
+            AttachmentUploadView.as_view(),
+            name=f'{name_prefix}archivos-subir',
+        ),
+        re_path(
+            r'^media/(?P<subpath>.+)$',
+            MediaAttachmentServeView.as_view(),
+            name=f'{name_prefix}media-serve',
+        ),
         re_path(r'^auth/registro/?$', RegisterView.as_view(), name=f'{name_prefix}auth-register'),
         re_path(r'^auth/login/?$', LoginView.as_view(), name=f'{name_prefix}auth-login'),
         re_path(

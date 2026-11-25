@@ -7,7 +7,12 @@ from .admin_auth_views import (
     AdminLandlordRequestDetailView,
     AdminLandlordRequestListView,
 )
-from .auth_views import LoginView, RegisterView
+from .auth_views import (
+    AttachmentUploadView,
+    LoginView,
+    MediaAttachmentServeView,
+    RegisterView,
+)
 from .claims_reviews_views import (
     AdminAppealResolveView,
     AdminClaimAppealListView,
@@ -45,6 +50,8 @@ def home_view(request):
 
 __all__ = [
     'home_view',
+    'AttachmentUploadView',
+    'MediaAttachmentServeView',
     'RegisterView',
     'LoginView',
     'AdminLandlordRequestListView',

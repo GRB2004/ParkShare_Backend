@@ -1,7 +1,10 @@
 from datetime import date, timedelta
+from pathlib import Path
+import tempfile
 from zoneinfo import ZoneInfo
 
-from django.test import RequestFactory
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -366,3 +369,178 @@ class AuthAPITests(APITestCase):
         req2 = factory.get('/protected/', HTTP_AUTHORIZATION=f'Bearer {landlord_token}')
         view_resp2 = DummyProtectedView.as_view()(req2)
         self.assertEqual(view_resp2.status_code, status.HTTP_200_OK)
+
+    def test_upload_landlord_documents_persist_and_admin_retrieves_files(self):
+        ine_bytes = b'\xff\xd8\xff\xe0\x00\x10JFIF-INE-DEMO-IMAGE'
+        csf_bytes = b'%PDF-1.4\n%CSF-CONSTANCIA-FISCAL-DEMO\n%%EOF'
+        prop_bytes = b'%PDF-1.4\n%ESCRITURA-PROPIEDAD-DEMO\n%%EOF'
+
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(MEDIA_ROOT=Path(tmp_media), MEDIA_URL='/media/'):
+                # Validation checks on upload endpoint
+                missing_file = self.client.post(
+                    '/archivos/subir',
+                    {'carpeta': 'docs'},
+                    format='multipart',
+                )
+                self.assertEqual(missing_file.status_code, status.HTTP_400_BAD_REQUEST)
+
+                bad_folder = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': '../sistema',
+                        'archivo': SimpleUploadedFile('ine.pdf', csf_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(bad_folder.status_code, status.HTTP_400_BAD_REQUEST)
+
+                bad_ext = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': 'docs',
+                        'archivo': SimpleUploadedFile('malware.exe', b'MZ', content_type='application/octet-stream'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(bad_ext.status_code, status.HTTP_400_BAD_REQUEST)
+
+                # Upload INE, CSF, and Propiedad (unauthenticated public registration flow)
+                up_ine = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': 'docs',
+                        'archivo': SimpleUploadedFile('INE Frontal Carlos.jpg', ine_bytes, content_type='image/jpeg'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(up_ine.status_code, status.HTTP_201_CREATED)
+                self.assertTrue(up_ine.data['url'].startswith('/media/docs/'))
+                self.assertTrue(up_ine.data['url'].endswith('.jpg'))
+
+                up_csf = self.client.post(
+                    '/api/v1/archivos/subir',
+                    {
+                        'carpeta': 'docs',
+                        'archivo': SimpleUploadedFile('Constancia Fiscal.pdf', csf_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(up_csf.status_code, status.HTTP_201_CREATED)
+                self.assertTrue(up_csf.data['url'].startswith('/media/docs/'))
+                self.assertTrue(up_csf.data['url'].endswith('.pdf'))
+
+                up_prop = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': 'docs',
+                        'archivo': SimpleUploadedFile('Escritura_Cochera.pdf', prop_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(up_prop.status_code, status.HTTP_201_CREATED)
+
+                reg_payload = {
+                    **self.landlord_payload,
+                    'correo': 'carlos.adjuntos@gmail.com',
+                    'url_ine': up_ine.data['url'],
+                    'url_csf': up_csf.data['url'],
+                    'url_propiedad': up_prop.data['url'],
+                }
+                reg_resp = self.client.post('/auth/registro', reg_payload, format='json')
+                self.assertEqual(reg_resp.status_code, status.HTTP_201_CREATED)
+                doc_id = reg_resp.data['documento']['id_documento']
+
+                # Admin inspects list & detail and downloads all three stored attachments
+                admin_token = self._login_and_get_token('admin@parkshare.mx', 'AdminPassword123!')
+                self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {admin_token}')
+
+                with self.assertNumQueries(3):
+                    list_resp = self.client.get('/admin/solicitudes')
+                self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+                item = list_resp.data['results'][0]
+                self.assertEqual(item['url_ine'], up_ine.data['url'])
+                self.assertEqual(item['url_csf'], up_csf.data['url'])
+                self.assertEqual(item['url_propiedad'], up_prop.data['url'])
+
+                detail_resp = self.client.get(f'/admin/solicitudes/{doc_id}')
+                self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+                self.assertEqual(detail_resp.data['url_ine'], up_ine.data['url'])
+                self.assertEqual(detail_resp.data['url_csf'], up_csf.data['url'])
+                self.assertEqual(detail_resp.data['url_propiedad'], up_prop.data['url'])
+                self.assertIn('documentos_adjuntos', detail_resp.data)
+
+                ine_download = self.client.get(detail_resp.data['url_ine'])
+                self.assertEqual(ine_download.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(ine_download.streaming_content), ine_bytes)
+                self.assertIn('image/jpeg', ine_download['Content-Type'])
+
+                csf_download = self.client.get(detail_resp.data['url_csf'])
+                self.assertEqual(csf_download.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(csf_download.streaming_content), csf_bytes)
+                self.assertIn('application/pdf', csf_download['Content-Type'])
+
+                prop_download = self.client.get(detail_resp.data['url_propiedad'])
+                self.assertEqual(prop_download.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(prop_download.streaming_content), prop_bytes)
+
+                missing_media = self.client.get('/media/docs/no_existe_archivo.pdf')
+                self.assertEqual(missing_media.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_register_landlord_direct_multipart_files_persists_and_cleans_up_on_error(self):
+        ine_bytes = b'%PDF-1.4\n%INE-DIRECTA\n%%EOF'
+        csf_bytes = b'%PDF-1.4\n%CSF-DIRECTA\n%%EOF'
+        prop_bytes = b'%PDF-1.4\n%PROP-DIRECTA\n%%EOF'
+
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(MEDIA_ROOT=Path(tmp_media), MEDIA_URL='/media/'):
+                # Invalid non-gmail with multipart files should fail 400 and leave no orphan files
+                bad_resp = self.client.post(
+                    '/auth/registro',
+                    {
+                        'nombre_completo': 'Pedro Arrendador Prueba',
+                        'correo': 'pedro@hotmail.com',
+                        'telefono': '5511223344',
+                        'password': 'MiPasswordSegura123!',
+                        'fecha_nacimiento': '1986-04-12',
+                        'rol': 'ARRENDADOR',
+                        'cuenta_cobro': '012180001122334455',
+                        'archivo_ine': SimpleUploadedFile('ine.pdf', ine_bytes, content_type='application/pdf'),
+                        'archivo_csf': SimpleUploadedFile('csf.pdf', csf_bytes, content_type='application/pdf'),
+                        'archivo_propiedad': SimpleUploadedFile('prop.pdf', prop_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(bad_resp.status_code, status.HTTP_400_BAD_REQUEST)
+                docs_dir = Path(tmp_media) / 'docs'
+                if docs_dir.exists():
+                    self.assertEqual(list(docs_dir.iterdir()), [])
+
+                # Valid direct multipart landlord registration
+                ok_resp = self.client.post(
+                    '/api/v1/auth/registro',
+                    {
+                        'nombre_completo': 'Pedro Arrendador Prueba',
+                        'correo': 'pedro.multipart@gmail.com',
+                        'telefono': '5511223344',
+                        'password': 'MiPasswordSegura123!',
+                        'fecha_nacimiento': '1986-04-12',
+                        'rol': 'ARRENDADOR',
+                        'cuenta_cobro': '012180001122334455',
+                        'archivo_ine': SimpleUploadedFile('ine.pdf', ine_bytes, content_type='application/pdf'),
+                        'archivo_csf': SimpleUploadedFile('csf.pdf', csf_bytes, content_type='application/pdf'),
+                        'archivo_propiedad': SimpleUploadedFile('prop.pdf', prop_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(ok_resp.status_code, status.HTTP_201_CREATED)
+                doc_data = ok_resp.data['documento']
+                self.assertTrue(doc_data['url_ine'].startswith('/media/docs/'))
+
+                admin_token = self._login_and_get_token('admin@parkshare.mx', 'AdminPassword123!')
+                self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {admin_token}')
+                detail_resp = self.client.get(f"/admin/solicitudes/{doc_data['id_documento']}")
+                self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+                dl_resp = self.client.get(detail_resp.data['url_ine'])
+                self.assertEqual(dl_resp.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(dl_resp.streaming_content), ine_bytes)
