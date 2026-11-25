@@ -93,6 +93,30 @@ class WithdrawalStatus(models.TextChoices):
     FALLIDO = 'FALLIDO', 'Fallido'
 
 
+class ComplaintReasonCategory(models.TextChoices):
+    TRATO_INADECUADO = 'TRATO_INADECUADO', 'Trato inadecuado'
+    NO_PUDE_ACCEDER = 'NO_PUDE_ACCEDER', 'No pude acceder'
+    DISTINTA_A_PUBLICADO = 'DISTINTA_A_PUBLICADO', 'Distinta a lo publicado'
+    OTRO = 'OTRO', 'Otro'
+
+
+class ComplaintStatus(models.TextChoices):
+    PENDIENTE = 'PENDIENTE', 'Pendiente'
+    REVISADA = 'REVISADA', 'Revisada'
+    DESCARTADA = 'DESCARTADA', 'Descartada'
+
+
+class SanctionStatus(models.TextChoices):
+    VIGENTE = 'VIGENTE', 'Vigente'
+    RETIRADA = 'RETIRADA', 'Retirada'
+
+
+class AppealStatus(models.TextChoices):
+    EN_REVISION = 'EN_REVISION', 'En revisión'
+    ACEPTADA = 'ACEPTADA', 'Aceptada'
+    RECHAZADA = 'RECHAZADA', 'Rechazada'
+
+
 class UsuarioManager(BaseUserManager):
     """Custom manager for ParkShare users supporting CLI superuser creation."""
 
@@ -762,3 +786,212 @@ class RetiroCobro(models.Model):
         super().clean()
         if not (self.cuenta_cobro or '').strip():
             raise ValidationError({'cuenta_cobro': ['La cuenta de cobro es obligatoria.']})
+
+
+class Resena(models.Model):
+    """Mutual post-reservation review and 1-5 rating between tenant and landlord (CU-09)."""
+
+    id_resena = models.BigAutoField(primary_key=True, db_column='id_resena')
+    reserva = models.ForeignKey(
+        Reserva,
+        on_delete=models.CASCADE,
+        related_name='resenas',
+        db_column='reserva_id',
+    )
+    autor = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='resenas_emitidas',
+        db_column='autor_id',
+    )
+    destinatario = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='resenas_recibidas',
+        db_column='destinatario_id',
+        db_index=True,
+    )
+    calificacion = models.PositiveSmallIntegerField(
+        db_column='calificacion',
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+    )
+    etiquetas = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_column='etiquetas',
+    )
+    comentario = models.TextField(
+        null=True,
+        blank=True,
+        db_column='comentario',
+    )
+    fecha = models.DateTimeField(default=timezone.now, db_column='fecha')
+
+    class Meta:
+        db_table = 'resena'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['reserva', 'autor'],
+                name='uq_resena_reserva_autor',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Review #{self.id_resena} - reservation {self.reserva_id} ({self.calificacion}/5)'
+
+    def clean(self) -> None:
+        super().clean()
+        if (
+            self.autor_id is not None
+            and self.destinatario_id is not None
+            and self.autor_id == self.destinatario_id
+        ):
+            raise ValidationError({
+                'destinatario': ['Un usuario no puede evaluarse a sí mismo.'],
+            })
+
+
+class Queja(models.Model):
+    """Tenant incident complaint linked to an active or completed reservation (CU-12)."""
+
+    id_queja = models.BigAutoField(primary_key=True, db_column='id_queja')
+    reserva = models.ForeignKey(
+        Reserva,
+        on_delete=models.PROTECT,
+        related_name='quejas',
+        db_column='reserva_id',
+    )
+    arrendatario = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='quejas_enviadas',
+        db_column='arrendatario_id',
+    )
+    arrendador = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='quejas_recibidas',
+        db_column='arrendador_id',
+        db_index=True,
+    )
+    motivo_categoria = models.CharField(
+        max_length=30,
+        choices=ComplaintReasonCategory.choices,
+        db_column='motivo_categoria',
+    )
+    descripcion = models.TextField(db_column='descripcion')
+    estado = models.CharField(
+        max_length=15,
+        choices=ComplaintStatus.choices,
+        default=ComplaintStatus.PENDIENTE,
+        db_column='estado',
+        db_index=True,
+    )
+    fecha_creacion = models.DateTimeField(default=timezone.now, db_column='fecha_creacion')
+
+    class Meta:
+        db_table = 'queja'
+        indexes = [
+            models.Index(
+                fields=['estado', 'fecha_creacion'],
+                name='idx_queja_estado_fecha',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Complaint #{self.id_queja} - reservation {self.reserva_id} ({self.estado})'
+
+    def clean(self) -> None:
+        super().clean()
+        if not (self.descripcion or '').strip():
+            raise ValidationError({'descripcion': ['La descripción de la queja es obligatoria.']})
+
+
+class Sancion(models.Model):
+    """Administrative sanction imposed on a landlord after a reviewed complaint (CU-13)."""
+
+    id_sancion = models.BigAutoField(primary_key=True, db_column='id_sancion')
+    queja = models.OneToOneField(
+        Queja,
+        on_delete=models.PROTECT,
+        related_name='sancion',
+        db_column='queja_id',
+    )
+    arrendador = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='sanciones',
+        db_column='arrendador_id',
+        db_index=True,
+    )
+    admin = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        related_name='sanciones_emitidas',
+        db_column='admin_id',
+    )
+    motivo = models.TextField(db_column='motivo')
+    estado = models.CharField(
+        max_length=15,
+        choices=SanctionStatus.choices,
+        default=SanctionStatus.VIGENTE,
+        db_column='estado',
+        db_index=True,
+    )
+    fecha_creacion = models.DateTimeField(default=timezone.now, db_column='fecha_creacion')
+
+    class Meta:
+        db_table = 'sancion'
+        indexes = [
+            models.Index(
+                fields=['arrendador', 'estado', 'fecha_creacion'],
+                name='idx_sancion_arrendador_est',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'Sanction #{self.id_sancion} - landlord {self.arrendador_id} ({self.estado})'
+
+    def clean(self) -> None:
+        super().clean()
+        if not (self.motivo or '').strip():
+            raise ValidationError({'motivo': ['El motivo de la sanción es obligatorio.']})
+
+
+class Apelacion(models.Model):
+    """Landlord appeal against an active sanction with optional evidence URL (CU-13)."""
+
+    id_apelacion = models.BigAutoField(primary_key=True, db_column='id_apelacion')
+    sancion = models.OneToOneField(
+        Sancion,
+        on_delete=models.PROTECT,
+        related_name='apelacion',
+        db_column='sancion_id',
+    )
+    descripcion = models.TextField(db_column='descripcion')
+    url_evidencia = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_column='url_evidencia',
+    )
+    estado = models.CharField(
+        max_length=15,
+        choices=AppealStatus.choices,
+        default=AppealStatus.EN_REVISION,
+        db_column='estado',
+        db_index=True,
+    )
+    fecha_creacion = models.DateTimeField(default=timezone.now, db_column='fecha_creacion')
+
+    class Meta:
+        db_table = 'apelacion'
+
+    def __str__(self) -> str:
+        return f'Appeal #{self.id_apelacion} - sanction {self.sancion_id} ({self.estado})'
+
+    def clean(self) -> None:
+        super().clean()
+        if not (self.descripcion or '').strip():
+            raise ValidationError({'descripcion': ['La descripción de la apelación es obligatoria.']})

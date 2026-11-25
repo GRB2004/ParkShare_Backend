@@ -9,7 +9,8 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - **Módulo `02-cocheras` implementado, probado y APROBADO por `Reviewer`** (26 tests; 61/61 tests totales en verde incluyendo `GET /admin/cocheras`, sin migraciones pendientes).
 - **Módulo `03-reservas` implementado, probado y APROBADO por `Reviewer`** (incluyendo Fase 5 con `RN-07` y `RN-08`; 20 tests).
 - **Módulo `04-qr-acceso` implementado, probado y APROBADO por `Reviewer`** (incluyendo Fase 5 con `GET/POST /reservas/simular-qr` y enriquecimiento de `GET /reservas/{id}/qr`; 17 tests en verde).
-- **Módulo `05-pagos-cobros` implementado, probado y APROBADO por `Reviewer`** (13 tests; 111/111 tests totales en verde, sin migraciones pendientes).
+- **Módulo `05-pagos-cobros` implementado, probado y APROBADO por `Reviewer`** (13 tests en verde).
+- **Módulo `06-quejas-sanciones-resenas` implementado, probado y APROBADO por `Reviewer`** (10 tests nuevos; 121/121 tests totales en verde, sin migraciones pendientes).
 
 ## Decisiones (y por qué)
 - **Alineación con la Constitución**: Lógica de negocio en backend Django/DRF, código en inglés, mensajes/documentación en español, TDD obligatorio.
@@ -19,6 +20,7 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - **Cocheras (`02-cocheras`) y Reservas (`03-reservas`)**: Búsqueda Haversine en SQL MySQL + `Subquery` de ocupación en 4 queries; `Reserva` (`RESTRICT`) con `select_for_update()` sobre `Cochera`, cálculo entero `_ceil_minutes` (`RN-01`..`RN-05`) y auto-emisión de QR de `ENTRADA` al pasar a `CONFIRMADA`.
 - **Códigos QR (`04-qr-acceso`)**: `CodigoQR` (`db_table='codigo_qr'`, `UNIQUE(reserva_id, tipo_qr)`) con SHA-256 CSPRNG (`secrets`), `GoneError` (`410`), expiración de `SALIDA` extendida `+24h` (`max(fin, now)+24h`), validación atómica con `select_for_update()` sin filtrar token de `SALIDA` al arrendador, y hook `apply_late_checkout_payment_adjustment_hook` conectado con `05-pagos-cobros`.
 - **Pagos y Cobros (`05-pagos-cobros`)**: `Pago` (`db_table='pago'`) y `RetiroCobro` (`db_table='retiro_cobro'`), patrón Bridge (`PaymentGatewayBridge` / `SimulatedPaymentGatewayAdapter` en `puentes/payment_gateway.py`), cobro atómico (`POST /pagos`: `201` confirma y emite QR, `402` cancela), sincronización de `RN-02`..`RN-05`, panel `GET /arrendador/cobros` en `America/Mexico_City` y retiro atómico `POST /arrendador/cobros/retirar`.
+- **Reseñas, Quejas, Sanciones y Apelaciones (`06-quejas-sanciones-resenas`)**: `Resena` (`db_table='resena'`, `UNIQUE(reserva_id, autor_id)`), `Queja` (`db_table='queja'`), `Sancion` (`db_table='sancion'`, `1:1 queja`) y `Apelacion` (`db_table='apelacion'`, `1:1 sancion`) con los 9 endpoints REST (`CU-09`, `CU-12`, `CU-13`) protegidos por rol y `select_for_update()`.
 
 ## Aprendizajes y errores a evitar
 - En `Model.__init__`, Django `from_db` instancia `cls(*values)` con `_state.adding == True`; validar `not args and kwargs` antes de aplicar defaults por rol.
@@ -28,4 +30,4 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - Nunca ejecutar dos corridas paralelas de `manage.py test` sobre MySQL `test_parkshare_db` al mismo tiempo para evitar deadlocks.
 
 ## Próximos pasos
-- Iniciar implementación TDD del Módulo `06-quejas-sanciones-resenas` (`specs/06-quejas-sanciones-resenas/spec.md` y `tasks.md`).
+- Los 6 módulos de backend (`01-auth` a `06-quejas-sanciones-resenas`) están implementados, probados (121/121 tests en verde) y aprobados por `Reviewer`.

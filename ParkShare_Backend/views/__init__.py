@@ -8,6 +8,16 @@ from .admin_auth_views import (
     AdminLandlordRequestListView,
 )
 from .auth_views import LoginView, RegisterView
+from .claims_reviews_views import (
+    AdminAppealResolveView,
+    AdminClaimAppealListView,
+    AdminComplaintDetailResolveView,
+    ComplaintCreateView,
+    LandlordSanctionDetailView,
+    LandlordSanctionListView,
+    ReservationReviewCreateView,
+    SanctionAppealCreateView,
+)
 from .cochera_views import (
     AdminGarageListView,
     AdminGarageValidationView,
@@ -56,4 +66,12 @@ __all__ = [
     'ProcessPaymentView',
     'HostEarningsView',
     'HostWithdrawView',
+    'ReservationReviewCreateView',
+    'ComplaintCreateView',
+    'AdminClaimAppealListView',
+    'AdminComplaintDetailResolveView',
+    'LandlordSanctionListView',
+    'LandlordSanctionDetailView',
+    'SanctionAppealCreateView',
+    'AdminAppealResolveView',
 ]
