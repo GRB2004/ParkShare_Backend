@@ -471,3 +471,62 @@ class ReservasAPITests(APITestCase):
         self.assertEqual(r2.estado, ReservationStatus.CANCELADA)
         self.assertEqual(r2.monto_penalizacion, Decimal('100.00'))
 
+    def test_multa_acumulada_exposed_in_list_detail_and_cancel_past_entry_tolerance(self):
+        now_dt = timezone.now()
+
+        # 1. EN_USO reservation 15m past end_dt (5m beyond 10m RN-02 grace -> $50.00 live surcharge)
+        r_overtime = Reserva.objects.create(
+            arrendatario=self.other_tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=now_dt - timedelta(minutes=75),
+            fecha_hora_fin=now_dt - timedelta(minutes=15),
+            monto_base=Decimal('45.00'),
+            estado=ReservationStatus.EN_USO,
+        )
+        self._auth_as(self.other_tenant.correo)
+        with patch('django.utils.timezone.now', return_value=now_dt):
+            res_overtime_detail = self.client.get(f'/reservas/{r_overtime.id_reserva}')
+            res_overtime_list = self.client.get('/reservas?vista=proximas')
+        self.assertEqual(res_overtime_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_overtime_detail.data['multa_acumulada'], '50.00')
+        self.assertEqual(res_overtime_detail.data['desglose_montos']['multa_acumulada'], '50.00')
+        self.assertEqual(res_overtime_detail.data['desglose_montos']['recargo_estimado_actual'], '50.00')
+        self.assertEqual(res_overtime_detail.data['desglose_montos']['monto_total_estimado'], '95.00')
+
+        self.assertEqual(res_overtime_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_overtime_list.data['results'][0]['multa_acumulada'], '50.00')
+
+        # 2. CONFIRMADA reservation 25m past start_dt (> 20m RN-07 tolerance), even if created recently
+        r_late_entry = Reserva.objects.create(
+            arrendatario=self.tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=now_dt - timedelta(minutes=25),
+            fecha_hora_fin=now_dt + timedelta(minutes=95),
+            monto_base=Decimal('80.00'),
+            estado=ReservationStatus.CONFIRMADA,
+        )
+        self._auth_as(self.tenant.correo)
+        res_pre_detail = self.client.get(f'/reservas/{r_late_entry.id_reserva}')
+        self.assertEqual(res_pre_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_pre_detail.data['multa_acumulada'], '100.00')
+        self.assertEqual(res_pre_detail.data['desglose_montos']['multa_acumulada'], '100.00')
+
+        # Cancelling past the 20m entry tolerance MUST apply $100.00 penalty regardless of fecha_creacion
+        res_cancel = self.client.post(f'/reservas/{r_late_entry.id_reserva}/cancelar')
+        self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_cancel.data['aplico_multa_tardia'])
+        self.assertEqual(res_cancel.data['monto_penalizacion'], '100.00')
+        self.assertEqual(res_cancel.data['multa_acumulada'], '100.00')
+        self.assertEqual(res_cancel.data['monto_total'], '100.00')
+
+        # Cancelled reservation in history and detail reports $100.00 penalty and $100.00 total (not base + penalty)
+        res_hist = self.client.get('/reservas?vista=anteriores')
+        self.assertEqual(res_hist.status_code, status.HTTP_200_OK)
+        cancelled_item = next(
+            x for x in res_hist.data['results'] if x['id_reserva'] == r_late_entry.id_reserva
+        )
+        self.assertEqual(cancelled_item['monto_penalizacion'], '100.00')
+        self.assertEqual(cancelled_item['multa_acumulada'], '100.00')
+        self.assertEqual(cancelled_item['monto_total'], '100.00')
+
+

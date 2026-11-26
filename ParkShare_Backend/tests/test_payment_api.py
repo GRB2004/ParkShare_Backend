@@ -400,3 +400,56 @@ class PaymentAPITests(APITestCase):
 
         self.landlord_no_account.refresh_from_db()
         self.assertEqual(self.landlord_no_account.cuenta_cobro, '012180009999888878')
+
+    def test_host_cobros_includes_cancelled_reservation_penalty_and_multa_acumulada(self):
+        now_dt = datetime(2026, 11, 26, 15, 0, tzinfo=MEXICO_TZ)
+        r_late = Reserva.objects.create(
+            arrendatario=self.tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=now_dt - timedelta(minutes=25),
+            fecha_hora_fin=now_dt + timedelta(minutes=95),
+            monto_base=Decimal('80.00'),
+            monto_penalizacion=Decimal('0.00'),
+            estado=ReservationStatus.CONFIRMADA,
+        )
+        Pago.objects.create(
+            reserva=r_late,
+            monto_total=Decimal('80.00'),
+            metodo='TARJETA',
+            referencia_pasarela='PS-PAY-LATE-301',
+            estado=PaymentStatus.APROBADO,
+            fecha_pago=now_dt - timedelta(minutes=30),
+        )
+        qr_late = CodigoQR.objects.create(
+            reserva=r_late,
+            token_qr='a' * 64,
+            tipo_qr=QRCodeType.ENTRADA,
+            usado=False,
+            fecha_emision=now_dt - timedelta(minutes=30),
+            expiracion=r_late.fecha_hora_fin,
+        )
+
+        self._auth_as(self.landlord.correo)
+        with patch('django.utils.timezone.now', return_value=now_dt):
+            res_scan = self.client.post('/reservas/validar', {'token': qr_late.token_qr}, format='json')
+            self.assertEqual(res_scan.status_code, status.HTTP_409_CONFLICT)
+            self.assertEqual(res_scan.data['monto_penalizacion'], '100.00')
+            self.assertEqual(res_scan.data['multa_acumulada'], '100.00')
+
+            res_cobros = self.client.get('/arrendador/cobros')
+            self.assertEqual(res_cobros.status_code, status.HTTP_200_OK)
+            self.assertEqual(res_cobros.data['ganado_hoy'], '100.00')
+            self.assertEqual(res_cobros.data['disponible_para_retirar'], '100.00')
+            self.assertEqual(res_cobros.data['multa_acumulada'], '100.00')
+            self.assertEqual(len(res_cobros.data['movimientos']), 1)
+            mov = res_cobros.data['movimientos'][0]
+            self.assertEqual(mov['estado'], 'Pagado')
+            self.assertEqual(mov['monto'], '100.00')
+            self.assertEqual(mov['monto_base'], '0.00')
+            self.assertEqual(mov['monto_penalizacion'], '100.00')
+            self.assertEqual(mov['multa_acumulada'], '100.00')
+
+            res_withdraw = self.client.post('/arrendador/cobros/retirar', {}, format='json')
+            self.assertEqual(res_withdraw.status_code, status.HTTP_201_CREATED)
+            self.assertEqual(res_withdraw.data['monto_retirado'], '100.00')
+

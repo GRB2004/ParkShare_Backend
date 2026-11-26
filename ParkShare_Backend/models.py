@@ -605,8 +605,10 @@ class Reserva(models.Model):
 
     @property
     def monto_total(self) -> Decimal:
-        base = self.monto_base if self.monto_base is not None else Decimal('0.00')
         penalty = self.monto_penalizacion if self.monto_penalizacion is not None else Decimal('0.00')
+        if self.estado == ReservationStatus.CANCELADA:
+            return penalty
+        base = self.monto_base if self.monto_base is not None else Decimal('0.00')
         return base + penalty
 
     def clean(self) -> None:

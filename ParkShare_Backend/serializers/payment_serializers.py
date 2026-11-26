@@ -57,7 +57,9 @@ class HostFinancialMovementSerializer(serializers.Serializer):
     monto = serializers.CharField()
     monto_base = serializers.CharField()
     monto_penalizacion = serializers.CharField()
+    multa_acumulada = serializers.CharField(required=False)
     estado = serializers.CharField()
+    estado_reserva = serializers.CharField(required=False)
     fecha_pago = serializers.DateTimeField()
 
 
@@ -66,6 +68,7 @@ class HostFinancialSummarySerializer(serializers.Serializer):
 
     ganado_hoy = serializers.CharField()
     disponible_para_retirar = serializers.CharField()
+    multa_acumulada = serializers.CharField(required=False)
     cuenta_cobro = serializers.CharField(allow_null=True)
     movimientos = HostFinancialMovementSerializer(many=True)
 

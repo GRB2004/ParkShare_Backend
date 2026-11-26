@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from ParkShare_Backend.models import Cochera, CodigoQR, Reserva, Usuario
+from ParkShare_Backend.services.reserva_service import compute_accumulated_penalty
 
 
 class QRReservationGarageSerializer(serializers.ModelSerializer):
@@ -25,6 +26,7 @@ class QRReservationTenantSerializer(serializers.ModelSerializer):
 class QRReservationSummarySerializer(serializers.ModelSerializer):
     cochera = QRReservationGarageSerializer(read_only=True)
     arrendatario = QRReservationTenantSerializer(read_only=True)
+    multa_acumulada = serializers.SerializerMethodField()
 
     class Meta:
         model = Reserva
@@ -34,9 +36,14 @@ class QRReservationSummarySerializer(serializers.ModelSerializer):
             'fecha_hora_inicio',
             'fecha_hora_fin',
             'monto_base',
+            'monto_penalizacion',
+            'multa_acumulada',
             'cochera',
             'arrendatario',
         ]
+
+    def get_multa_acumulada(self, obj: Reserva) -> str:
+        return f'{compute_accumulated_penalty(obj):.2f}'
 
 
 class CodigoQRDetailSerializer(serializers.ModelSerializer):

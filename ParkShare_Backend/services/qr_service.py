@@ -27,6 +27,7 @@ from ParkShare_Backend.services.reserva_service import (
     ENTRY_TOLERANCE_MINUTES,
     LATE_ENTRY_PENALTY,
     TOLERANCE_MINUTES,
+    _ceil_minutes,
     calculate_late_surcharge,
     finish_reservation,
     start_reservation_usage,
@@ -322,18 +323,38 @@ def validate_scanned_qr(
                 'minutos_retraso': late_minutes,
                 'monto_base': f'{updated_reservation.monto_base:.2f}',
                 'monto_penalizacion': f'{updated_reservation.monto_penalizacion:.2f}',
+                'multa_acumulada': f'{updated_reservation.monto_penalizacion:.2f}',
                 'monto_total': f'{updated_reservation.monto_total:.2f}',
                 'arrendatario': _build_tenant_verification_dict(updated_reservation.arrendatario),
             },
         }
 
     if late_entry_cancelled:
+        late_entry_minutes = _ceil_minutes(reference_now - reservation.fecha_hora_inicio)
         raise ConflictError(
             'Se excedió la tolerancia de 20 minutos para la entrada. La reservación fue cancelada automáticamente con una multa de $100.00 MXN.',
             error_code='LateEntryCancelled',
             extra_data={
+                'tipo_qr': QRCodeType.ENTRADA,
                 'estado_reserva': ReservationStatus.CANCELADA,
+                'tolerancia_minutos': ENTRY_TOLERANCE_MINUTES,
+                'minutos_retraso': late_entry_minutes,
+                'monto_base': f'{reservation.monto_base:.2f}',
                 'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
+                'multa_acumulada': f'{LATE_ENTRY_PENALTY:.2f}',
+                'monto_total': f'{LATE_ENTRY_PENALTY:.2f}',
+                'verificacion': {
+                    'reserva_id': reservation.id_reserva,
+                    'fecha_hora_inicio': reservation.fecha_hora_inicio.isoformat(),
+                    'fecha_hora_fin': reservation.fecha_hora_fin.isoformat(),
+                    'tolerancia_minutos': ENTRY_TOLERANCE_MINUTES,
+                    'minutos_retraso': late_entry_minutes,
+                    'monto_base': f'{reservation.monto_base:.2f}',
+                    'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
+                    'multa_acumulada': f'{LATE_ENTRY_PENALTY:.2f}',
+                    'monto_total': f'{LATE_ENTRY_PENALTY:.2f}',
+                    'arrendatario': _build_tenant_verification_dict(reservation.arrendatario),
+                },
             },
         )
 

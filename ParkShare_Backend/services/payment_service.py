@@ -4,7 +4,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -307,21 +307,37 @@ def get_host_financial_summary(
 
     earned_today = Decimal('0.00')
     total_released = Decimal('0.00')
+    total_penalties = Decimal('0.00')
     all_movements: list[dict] = []
 
     for payment in payments:
         res = payment.reserva
+        penalty_amount = _quantize_money(res.monto_penalizacion)
+
         if res.estado == ReservationStatus.FINALIZADA:
             visual_status = 'Pagado'
             amount = _quantize_money(payment.monto_total)
+            base_for_movement = _quantize_money(res.monto_base)
             total_released += amount
+            total_penalties += penalty_amount
 
             completion_dt = res.hora_salida_real or res.fecha_hora_fin
             if completion_dt and completion_dt.astimezone(MEXICO_TZ).date() == local_today:
                 earned_today += amount
+        elif res.estado == ReservationStatus.CANCELADA and penalty_amount > Decimal('0.00'):
+            visual_status = 'Pagado'
+            amount = _quantize_money(payment.monto_total)
+            base_for_movement = Decimal('0.00')
+            total_released += amount
+            total_penalties += penalty_amount
+
+            cancel_dt = payment.fecha_pago or res.fecha_hora_inicio
+            if cancel_dt and cancel_dt.astimezone(MEXICO_TZ).date() == local_today:
+                earned_today += amount
         elif res.estado in (ReservationStatus.CONFIRMADA, ReservationStatus.EN_USO):
             visual_status = 'Pendiente de uso'
             amount = _quantize_money(payment.monto_total)
+            base_for_movement = _quantize_money(res.monto_base)
         else:
             continue
 
@@ -335,9 +351,11 @@ def get_host_financial_summary(
             'cochera': res.cochera.nombre,
             'fecha_horario': schedule_label,
             'monto': f'{amount:.2f}',
-            'monto_base': f'{_quantize_money(res.monto_base):.2f}',
-            'monto_penalizacion': f'{_quantize_money(res.monto_penalizacion):.2f}',
+            'monto_base': f'{base_for_movement:.2f}',
+            'monto_penalizacion': f'{penalty_amount:.2f}',
+            'multa_acumulada': f'{penalty_amount:.2f}',
             'estado': visual_status,
+            'estado_reserva': res.estado,
             'fecha_pago': payment.fecha_pago,
         }
         if normalized_filter is None or visual_status == normalized_filter:
@@ -356,6 +374,7 @@ def get_host_financial_summary(
     return {
         'ganado_hoy': f'{_quantize_money(earned_today):.2f}',
         'disponible_para_retirar': f'{available:.2f}',
+        'multa_acumulada': f'{_quantize_money(total_penalties):.2f}',
         'cuenta_cobro': mask_payout_account(host_user.cuenta_cobro),
         'movimientos': all_movements,
     }
@@ -400,8 +419,15 @@ def withdraw_host_balance(
             Pago.objects.filter(
                 reserva__cochera__arrendador_id=locked_host.id_usuario,
                 estado=PaymentStatus.APROBADO,
-                reserva__estado=ReservationStatus.FINALIZADA,
-            ).aggregate(total=Coalesce(Sum('monto_total'), Decimal('0.00')))['total']
+            )
+            .filter(
+                Q(reserva__estado=ReservationStatus.FINALIZADA)
+                | Q(
+                    reserva__estado=ReservationStatus.CANCELADA,
+                    reserva__monto_penalizacion__gt=Decimal('0.00'),
+                )
+            )
+            .aggregate(total=Coalesce(Sum('monto_total'), Decimal('0.00')))['total']
             or Decimal('0.00')
         )
         withdrawn_total = (

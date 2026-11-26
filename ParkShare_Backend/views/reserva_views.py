@@ -125,7 +125,7 @@ class ReservationCancelView(APIView):
             return handle_domain_exception(exc)
 
         message = (
-            'Reserva cancelada con multa por cancelación tardía.'
+            f'Reserva cancelada con multa de ${reservation.monto_penalizacion:.2f} MXN por cancelación tardía o tolerancia vencida.'
             if penalty_applied
             else 'Reserva cancelada sin cargo adicional.'
         )
@@ -136,6 +136,8 @@ class ReservationCancelView(APIView):
                 'estado': reservation.estado,
                 'monto_base': f'{reservation.monto_base:.2f}',
                 'monto_penalizacion': f'{reservation.monto_penalizacion:.2f}',
+                'multa_acumulada': f'{reservation.monto_penalizacion:.2f}',
+                'monto_total': f'{reservation.monto_total:.2f}',
                 'aplico_multa_tardia': penalty_applied,
             },
             status=status.HTTP_200_OK,

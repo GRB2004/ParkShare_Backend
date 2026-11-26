@@ -333,6 +333,11 @@ class QRAPITests(APITestCase):
         self.assertEqual(res2.data['error'], 'LateEntryCancelled')
         self.assertEqual(res2.data['estado_reserva'], ReservationStatus.CANCELADA)
         self.assertEqual(res2.data['monto_penalizacion'], '100.00')
+        self.assertEqual(res2.data['multa_acumulada'], '100.00')
+        self.assertEqual(res2.data['monto_total'], '100.00')
+        self.assertEqual(res2.data['verificacion']['reserva_id'], r2.id_reserva)
+        self.assertEqual(res2.data['verificacion']['monto_penalizacion'], '100.00')
+        self.assertEqual(res2.data['verificacion']['multa_acumulada'], '100.00')
         self.assertIn('Se excedió la tolerancia de 20 minutos para la entrada', res2.data['detail'])
 
         # DB persistence check

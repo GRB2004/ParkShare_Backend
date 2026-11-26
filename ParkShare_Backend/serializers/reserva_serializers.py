@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from ParkShare_Backend.models import Cochera, Reserva, Usuario
+from ParkShare_Backend.services.reserva_service import compute_accumulated_penalty
 
 
 class ReservaCreateSerializer(serializers.Serializer):
@@ -17,6 +18,7 @@ class ReservaCreationResponseSerializer(serializers.ModelSerializer):
     arrendatario_id = serializers.IntegerField(read_only=True)
     cochera_id = serializers.IntegerField(read_only=True)
     monto_total = serializers.DecimalField(max_digits=8, decimal_places=2, read_only=True)
+    multa_acumulada = serializers.SerializerMethodField()
 
     class Meta:
         model = Reserva
@@ -29,10 +31,14 @@ class ReservaCreationResponseSerializer(serializers.ModelSerializer):
             'hora_salida_real',
             'monto_base',
             'monto_penalizacion',
+            'multa_acumulada',
             'monto_total',
             'estado',
             'fecha_creacion',
         ]
+
+    def get_multa_acumulada(self, obj: Reserva) -> str:
+        return f'{compute_accumulated_penalty(obj):.2f}'
 
 
 class ReservaGarageSummarySerializer(serializers.ModelSerializer):
@@ -53,6 +59,7 @@ class ReservaListSerializer(serializers.ModelSerializer):
     cochera = ReservaGarageSummarySerializer(read_only=True)
     arrendatario = ReservaTenantSummarySerializer(read_only=True)
     monto_total = serializers.DecimalField(max_digits=8, decimal_places=2, read_only=True)
+    multa_acumulada = serializers.SerializerMethodField()
 
     class Meta:
         model = Reserva
@@ -65,8 +72,12 @@ class ReservaListSerializer(serializers.ModelSerializer):
             'estado',
             'monto_base',
             'monto_penalizacion',
+            'multa_acumulada',
             'monto_total',
         ]
+
+    def get_multa_acumulada(self, obj: Reserva) -> str:
+        return f'{compute_accumulated_penalty(obj):.2f}'
 
 
 class ReservaDetailGarageSerializer(serializers.ModelSerializer):
@@ -78,7 +89,9 @@ class ReservaDetailGarageSerializer(serializers.ModelSerializer):
 class ReservaAmountBreakdownSerializer(serializers.Serializer):
     monto_base = serializers.DecimalField(max_digits=8, decimal_places=2)
     monto_penalizacion = serializers.DecimalField(max_digits=8, decimal_places=2)
+    multa_acumulada = serializers.DecimalField(max_digits=8, decimal_places=2)
     monto_total = serializers.DecimalField(max_digits=8, decimal_places=2)
+    monto_total_estimado = serializers.DecimalField(max_digits=8, decimal_places=2)
     recargo_estimado_actual = serializers.DecimalField(max_digits=8, decimal_places=2)
 
 
@@ -91,6 +104,7 @@ class ReservaUsageTimeSerializer(serializers.Serializer):
 class ReservaDetailSerializer(serializers.ModelSerializer):
     """Output serializer for reservation detail including live usage/delay calculations."""
 
+    multa_acumulada = serializers.SerializerMethodField()
     desglose_montos = serializers.SerializerMethodField()
     tiempo_en_uso = serializers.SerializerMethodField()
     cochera = ReservaDetailGarageSerializer(read_only=True)
@@ -105,11 +119,18 @@ class ReservaDetailSerializer(serializers.ModelSerializer):
             'fecha_hora_fin',
             'hora_salida_real',
             'fecha_creacion',
+            'multa_acumulada',
             'desglose_montos',
             'tiempo_en_uso',
             'cochera',
             'arrendatario',
         ]
+
+    def get_multa_acumulada(self, obj: Reserva) -> str:
+        accumulated = self.context['metrics'].get('multa_acumulada')
+        if accumulated is None:
+            accumulated = compute_accumulated_penalty(obj)
+        return f'{accumulated:.2f}'
 
     def get_desglose_montos(self, obj: Reserva) -> dict:
         breakdown = self.context['metrics']['desglose_montos']
@@ -133,6 +154,7 @@ class ReservaPatchResponseSerializer(serializers.ModelSerializer):
     """Output serializer for PATCH /reservas/{id} response."""
 
     monto_total = serializers.DecimalField(max_digits=8, decimal_places=2, read_only=True)
+    multa_acumulada = serializers.SerializerMethodField()
 
     class Meta:
         model = Reserva
@@ -144,6 +166,10 @@ class ReservaPatchResponseSerializer(serializers.ModelSerializer):
             'hora_salida_real',
             'monto_base',
             'monto_penalizacion',
+            'multa_acumulada',
             'monto_total',
         ]
+
+    def get_multa_acumulada(self, obj: Reserva) -> str:
+        return f'{compute_accumulated_penalty(obj):.2f}'
 

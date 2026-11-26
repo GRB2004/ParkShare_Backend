@@ -153,16 +153,55 @@ def calculate_cancellation_penalty(
     reservation_status: str,
     created_dt: datetime,
     cancel_dt: datetime,
+    start_dt: datetime | None = None,
+    end_dt: datetime | None = None,
 ) -> tuple[bool, Decimal]:
-    """Calculate RN-04 (free <= 10 min) and RN-05 ($100 MXN after 10 min on CONFIRMADA)."""
+    """Calculate RN-04 (free <= 10 min), RN-05 ($100 MXN after 10 min), and RN-07 ($100 MXN past +20 min entry tolerance)."""
     if reservation_status == ReservationStatus.SOLICITADA:
         return False, Decimal('0.00')
 
+    aware_cancel = _ensure_aware_dt(cancel_dt)
+    if start_dt is not None:
+        entry_limit = _ensure_aware_dt(start_dt) + timedelta(minutes=ENTRY_TOLERANCE_MINUTES)
+        within_window = end_dt is None or aware_cancel <= _ensure_aware_dt(end_dt)
+        if aware_cancel > entry_limit and within_window:
+            return True, LATE_ENTRY_PENALTY
+
     free_limit = _ensure_aware_dt(created_dt) + timedelta(minutes=TOLERANCE_MINUTES)
-    if _ensure_aware_dt(cancel_dt) <= free_limit:
+    if aware_cancel <= free_limit:
         return False, Decimal('0.00')
 
     return True, LATE_CANCEL_PENALTY
+
+
+def compute_accumulated_penalty(
+    reservation: Reserva,
+    reference_now: datetime | None = None,
+) -> Decimal:
+    """Compute persisted or live accumulated penalty (RN-03 / RN-05 / RN-07) in MXN."""
+    now_dt = _ensure_aware_dt(reference_now) if reference_now is not None else timezone.now()
+    persisted = (
+        reservation.monto_penalizacion
+        if reservation.monto_penalizacion is not None
+        else Decimal('0.00')
+    )
+
+    if reservation.estado in (ReservationStatus.CANCELADA, ReservationStatus.FINALIZADA):
+        return persisted.quantize(Decimal('0.01'))
+
+    if reservation.estado == ReservationStatus.EN_USO:
+        _, estimated_surcharge = calculate_late_surcharge(reservation.fecha_hora_fin, now_dt)
+        return max(persisted, estimated_surcharge).quantize(Decimal('0.01'))
+
+    if reservation.estado == ReservationStatus.CONFIRMADA and reservation.fecha_hora_inicio is not None:
+        entry_limit = _ensure_aware_dt(reservation.fecha_hora_inicio) + timedelta(
+            minutes=ENTRY_TOLERANCE_MINUTES
+        )
+        if now_dt > entry_limit:
+            return LATE_ENTRY_PENALTY
+        return persisted.quantize(Decimal('0.01'))
+
+    return Decimal('0.00')
 
 
 def _merged_day_slots(garage: Cochera, weekday_code: str) -> list[tuple[time, time]]:
@@ -394,6 +433,8 @@ def _execute_transition(
                 reservation.estado,
                 reservation.fecha_creacion,
                 reference_now,
+                start_dt=reservation.fecha_hora_inicio,
+                end_dt=reservation.fecha_hora_fin,
             )
             reservation.monto_penalizacion = penalty
             update_fields.append('monto_penalizacion')
@@ -436,7 +477,10 @@ def _execute_transition(
             error_code='LateEntryCancelled',
             extra_data={
                 'estado_reserva': ReservationStatus.CANCELADA,
+                'monto_base': f'{reservation.monto_base:.2f}',
                 'monto_penalizacion': f'{LATE_ENTRY_PENALTY:.2f}',
+                'multa_acumulada': f'{LATE_ENTRY_PENALTY:.2f}',
+                'monto_total': f'{LATE_ENTRY_PENALTY:.2f}',
             },
         )
 
@@ -589,15 +633,28 @@ def build_reservation_live_metrics(
     reservation: Reserva,
     reference_now: datetime | None = None,
 ) -> dict:
-    """Compute live usage timer, tolerance flag, and estimated late surcharge for GET /reservas/{id}."""
+    """Compute live usage timer, tolerance flag, and accumulated penalty for GET /reservas/{id}."""
     now_dt = _ensure_aware_dt(reference_now) if reference_now is not None else timezone.now()
+    accumulated_penalty = compute_accumulated_penalty(reservation, reference_now=now_dt)
+    base_amount = reservation.monto_base if reservation.monto_base is not None else Decimal('0.00')
 
     if reservation.estado != ReservationStatus.EN_USO:
+        if reservation.estado == ReservationStatus.CANCELADA or (
+            reservation.estado == ReservationStatus.CONFIRMADA
+            and accumulated_penalty > Decimal('0.00')
+        ):
+            estimated_total = accumulated_penalty
+        else:
+            estimated_total = reservation.monto_total
+
         return {
+            'multa_acumulada': accumulated_penalty,
             'desglose_montos': {
                 'monto_base': reservation.monto_base,
                 'monto_penalizacion': reservation.monto_penalizacion,
+                'multa_acumulada': accumulated_penalty,
                 'monto_total': reservation.monto_total,
+                'monto_total_estimado': estimated_total,
                 'recargo_estimado_actual': Decimal('0.00'),
             },
             'tiempo_en_uso': None,
@@ -606,10 +663,13 @@ def build_reservation_live_metrics(
     if now_dt < reservation.fecha_hora_fin:
         remaining_minutes = _ceil_minutes(reservation.fecha_hora_fin - now_dt)
         return {
+            'multa_acumulada': accumulated_penalty,
             'desglose_montos': {
                 'monto_base': reservation.monto_base,
                 'monto_penalizacion': reservation.monto_penalizacion,
+                'multa_acumulada': accumulated_penalty,
                 'monto_total': reservation.monto_total,
+                'monto_total_estimado': (base_amount + accumulated_penalty).quantize(Decimal('0.01')),
                 'recargo_estimado_actual': Decimal('0.00'),
             },
             'tiempo_en_uso': {
@@ -622,12 +682,16 @@ def build_reservation_live_metrics(
     tolerance_limit = reservation.fecha_hora_fin + timedelta(minutes=TOLERANCE_MINUTES)
     in_tolerance = now_dt <= tolerance_limit
     late_minutes, estimated_surcharge = calculate_late_surcharge(reservation.fecha_hora_fin, now_dt)
+    live_accumulated = max(accumulated_penalty, estimated_surcharge).quantize(Decimal('0.01'))
 
     return {
+        'multa_acumulada': live_accumulated,
         'desglose_montos': {
             'monto_base': reservation.monto_base,
             'monto_penalizacion': reservation.monto_penalizacion,
+            'multa_acumulada': live_accumulated,
             'monto_total': reservation.monto_total,
+            'monto_total_estimado': (base_amount + live_accumulated).quantize(Decimal('0.01')),
             'recargo_estimado_actual': estimated_surcharge,
         },
         'tiempo_en_uso': {
