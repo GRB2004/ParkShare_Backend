@@ -1,6 +1,9 @@
-import math
 from collections import defaultdict
 from datetime import datetime, time
+from difflib import SequenceMatcher
+import math
+import re
+import unicodedata
 from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -49,6 +52,148 @@ ACTIVE_RESERVATION_STATUSES = (
     ReservationStatus.CONFIRMADA,
     ReservationStatus.EN_USO,
 )
+RECOMMENDATION_SIMILARITY_THRESHOLD = 0.42
+SEARCH_STOP_WORDS = frozenset({
+    'de', 'del', 'la', 'las', 'el', 'los', 'en', 'y', 'a', 'al', 'con', 'por', 'para',
+})
+STREET_ABBREVIATION_RULES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r'\bav\.?\b'), 'avenida'),
+    (re.compile(r'\bblvd\.?\b'), 'bulevar'),
+    (re.compile(r'\bcalz\.?\b'), 'calzada'),
+    (re.compile(r'\bcol\.?\b'), 'colonia'),
+    (re.compile(r'\bfracc\.?\b'), 'fraccionamiento'),
+    (re.compile(r'\bpriv\.?\b'), 'privada'),
+    (re.compile(r'\b(?:num|no)\.?\b'), ' '),
+)
+
+
+def _normalize_search_text(raw_text: str | None) -> str:
+    if not raw_text or not isinstance(raw_text, str):
+        return ''
+    lowered = (
+        unicodedata.normalize('NFKD', raw_text.strip().lower())
+        .encode('ascii', 'ignore')
+        .decode('ascii')
+    )
+    for pattern, replacement in STREET_ABBREVIATION_RULES:
+        lowered = pattern.sub(replacement, lowered)
+    cleaned = re.sub(r'[^a-z0-9\s]', ' ', lowered)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def _phonetic_spanish_key(token: str) -> str:
+    if not token:
+        return ''
+    s = token.lower()
+    s = s.replace('ce', 'se').replace('ci', 'si').replace('qu', 'k').replace('ll', 'y')
+    s = s.replace('z', 's').replace('v', 'b')
+    if s.startswith('h') and len(s) > 1:
+        s = s[1:]
+    return s
+
+
+def _tokenize_search_text(normalized_text: str) -> list[str]:
+    if not normalized_text:
+        return []
+    raw_tokens = [tok for tok in normalized_text.split(' ') if tok]
+    filtered = [tok for tok in raw_tokens if tok not in SEARCH_STOP_WORDS]
+    return filtered if filtered else raw_tokens
+
+
+def _score_single_query_token(qt: str, target_tokens: list[str], boost: float = 0.0) -> float:
+    if not qt or not target_tokens:
+        return 0.0
+    qt_phon = _phonetic_spanish_key(qt)
+    qt_is_num = qt.isdigit()
+    best = 0.0
+
+    for tt in target_tokens:
+        score = 0.0
+        if qt == tt:
+            score = 1.0
+        elif qt_is_num and tt.isdigit() and len(qt) == len(tt):
+            diff = abs(int(qt) - int(tt))
+            if diff <= 10:
+                score = 0.90
+            elif diff <= 50:
+                score = 0.82
+        elif not qt_is_num and not tt.isdigit():
+            tt_phon = _phonetic_spanish_key(tt)
+            if len(qt) >= 4 and qt_phon == tt_phon:
+                score = 0.92
+            elif len(qt) >= 3 and len(tt) >= 3 and (tt.startswith(qt) or qt.startswith(tt)):
+                score = 0.88
+            else:
+                raw_ratio = SequenceMatcher(None, qt, tt).ratio()
+                phon_ratio = SequenceMatcher(None, qt_phon, tt_phon).ratio()
+                combined_ratio = max(raw_ratio, phon_ratio * 0.96)
+                if combined_ratio >= 0.74:
+                    score = combined_ratio * 0.90
+
+        if score > 0.0:
+            best = max(best, min(1.0, score + boost))
+            if best >= 1.0:
+                break
+
+    return best
+
+
+def compute_garage_search_similarity(
+    query: str | None,
+    name: str | None,
+    address: str | None,
+) -> tuple[float, bool]:
+    """Compute similarity score [0.0..1.0] and recommendation flag against garage name & address."""
+    norm_q = _normalize_search_text(query)
+    if not norm_q:
+        return 0.0, False
+
+    norm_name = _normalize_search_text(name)
+    norm_addr = _normalize_search_text(address)
+
+    phrase_score = 0.0
+    in_name = norm_q in norm_name if norm_name else False
+    in_addr = norm_q in norm_addr if norm_addr else False
+    if in_name and in_addr:
+        phrase_score = 0.99
+    elif in_name:
+        phrase_score = 0.95
+    elif in_addr:
+        phrase_score = 0.91
+
+    q_tokens = _tokenize_search_text(norm_q)
+    name_tokens = _tokenize_search_text(norm_name)
+    addr_tokens = _tokenize_search_text(norm_addr)
+
+    token_score = 0.0
+    if q_tokens:
+        name_scores = [_score_single_query_token(qt, name_tokens) for qt in q_tokens]
+        addr_scores = [_score_single_query_token(qt, addr_tokens) for qt in q_tokens]
+        per_token = [
+            min(
+                0.98,
+                max(ns * 0.94, ads * 0.89) + (0.05 if ns >= 0.75 and ads >= 0.75 else 0.0),
+            )
+            for ns, ads in zip(name_scores, addr_scores)
+        ]
+        strong_hits = sum(1 for s in per_token if s >= 0.72)
+        token_score = sum(per_token) / len(q_tokens)
+        if len(q_tokens) >= 2 and strong_hits / len(q_tokens) >= 0.75:
+            token_score = min(0.96, token_score + 0.06)
+
+    segment_score = 0.0
+    segments = [norm_name] + [
+        _normalize_search_text(seg) for seg in (address or '').split(',') if seg.strip()
+    ]
+    for seg in segments:
+        if not seg:
+            continue
+        ratio = SequenceMatcher(None, norm_q, seg).ratio()
+        if ratio >= 0.68:
+            segment_score = max(segment_score, ratio * 0.85)
+
+    final_score = round(min(1.0, max(phrase_score, token_score, segment_score)), 3)
+    return final_score, final_score >= RECOMMENDATION_SIMILARITY_THRESHOLD
 
 
 def _check_active_landlord(user: Usuario) -> None:
@@ -528,16 +673,27 @@ def _build_haversine_distance_expression(lat_float: float, lng_float: float):
 
 
 def search_nearby_garages(
-    lat,
-    lng,
+    lat=None,
+    lng=None,
     order_by: str = 'cercania',
     radius_km=None,
     vehicle_type: str | None = None,
+    search_query: str | None = None,
     current_dt: datetime | None = None,
 ) -> list[Cochera]:
-    """Search approved garages near coordinates using Haversine SQL distance (CU-04)."""
-    lat_float = _parse_float_param(lat, 'lat', -90.0, 90.0, required=True)
-    lng_float = _parse_float_param(lng, 'lng', -180.0, 180.0, required=True)
+    """Search approved garages near coordinates and/or prioritize similar names & addresses (CU-04)."""
+    cleaned_query = (search_query or '').strip() if isinstance(search_query, str) else ''
+    has_query = len(cleaned_query) > 0
+    coords_required = not has_query
+
+    lat_float = _parse_float_param(lat, 'lat', -90.0, 90.0, required=coords_required)
+    lng_float = _parse_float_param(lng, 'lng', -180.0, 180.0, required=coords_required)
+    if (lat_float is None) != (lng_float is None):
+        missing_field = 'lat' if lat_float is None else 'lng'
+        raise DomainValidationError(
+            f'El parámetro {missing_field} es obligatorio cuando se envía una coordenada.',
+            errors={missing_field: [f'El parámetro {missing_field} es obligatorio.']},
+        )
 
     normalized_order = (order_by or 'cercania').strip().lower()
     if normalized_order not in VALID_ORDER_OPTIONS:
@@ -547,7 +703,7 @@ def search_nearby_garages(
         )
 
     radius_float = None
-    if radius_km is not None and radius_km != '':
+    if radius_km is not None and radius_km != '' and lat_float is not None and lng_float is not None:
         radius_float = _parse_float_param(radius_km, 'radio_km', 0.000001, 40075.0, required=False)
 
     reference_dt = current_dt or timezone.now()
@@ -564,12 +720,18 @@ def search_nearby_garages(
         .values('active_count')[:1]
     )
 
+    distance_expr = (
+        _build_haversine_distance_expression(lat_float, lng_float)
+        if lat_float is not None and lng_float is not None
+        else Value(0.0, output_field=FloatField())
+    )
+
     queryset = (
         Cochera.objects.filter(estado_cochera=GarageStatus.APROBADA)
         .select_related('arrendador')
         .prefetch_related('fotos', 'disponibilidades')
         .annotate(
-            distancia_km=_build_haversine_distance_expression(lat_float, lng_float),
+            distancia_km=distance_expr,
             _active_reservations_now=Coalesce(
                 Subquery(active_reservations_subquery, output_field=IntegerField()),
                 Value(0),
@@ -589,7 +751,7 @@ def search_nearby_garages(
         elif normalized_vehicle == VehicleType.AMBOS:
             queryset = queryset.filter(tipo_vehiculo=VehicleType.AMBOS)
 
-    if radius_float is not None:
+    if radius_float is not None and not has_query:
         queryset = queryset.filter(distancia_km__lte=radius_float)
 
     garages = list(queryset)
@@ -602,12 +764,39 @@ def search_nearby_garages(
         is_open, available_spaces = evaluate_garage_realtime_availability(garage, reference_dt)
         garage.abierta_ahora = is_open
         garage.espacios_disponibles_ahora = available_spaces
+        if has_query:
+            sim_score, is_rec = compute_garage_search_similarity(
+                cleaned_query,
+                garage.nombre,
+                garage.direccion,
+            )
+            garage.similitud_busqueda = sim_score
+            garage.es_recomendada = is_rec
+        else:
+            garage.similitud_busqueda = 0.0
+            garage.es_recomendada = False
 
-    if normalized_order == 'precio':
-        garages.sort(key=lambda g: (g.tarifa_hora, g._raw_distance_km, g.id_cochera))
-    elif normalized_order == 'disponibilidad':
-        garages.sort(key=lambda g: (-g.espacios_disponibles_ahora, g._raw_distance_km, g.id_cochera))
+    if radius_float is not None and has_query:
+        garages = [
+            g for g in garages if g.es_recomendada or g._raw_distance_km <= radius_float
+        ]
+
+    def _secondary_sort_key(g: Cochera):
+        if normalized_order == 'precio':
+            return (g.tarifa_hora, g._raw_distance_km, g.id_cochera)
+        if normalized_order == 'disponibilidad':
+            return (-g.espacios_disponibles_ahora, g._raw_distance_km, g.id_cochera)
+        return (g._raw_distance_km, g.id_cochera)
+
+    if has_query:
+        garages.sort(
+            key=lambda g: (
+                0 if g.es_recomendada else 1,
+                -g.similitud_busqueda,
+                *_secondary_sort_key(g),
+            )
+        )
     else:
-        garages.sort(key=lambda g: (g._raw_distance_km, g.id_cochera))
+        garages.sort(key=_secondary_sort_key)
 
     return garages

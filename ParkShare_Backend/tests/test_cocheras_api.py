@@ -602,3 +602,84 @@ class CocherasAPITests(APITestCase):
             format='json',
         )
         self.assertEqual(res_bad_patch.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_search_garages_by_address_similarity_and_zocalo_priority(self):
+        # Unrelated garage located right at the user's starting GPS (0.0 km away)
+        g_unrelated_near = self._create_approved_garage(
+            self.active_landlord,
+            'Cochera Polanco Norte',
+            '19.43200000',
+            '-99.19000000',
+            '50.00',
+        )
+        g_unrelated_near.direccion = 'Av. Presidente Masaryk 210, Polanco'
+        g_unrelated_near.save(update_fields=['direccion'])
+
+        # Garage 1 matching "Zócalo" directly in name & address (further away geographically)
+        g_zocalo_direct = self._create_approved_garage(
+            self.active_landlord,
+            'Estacionamiento Zócalo Histórico',
+            '19.04360000',
+            '-98.19810000',
+            '35.00',
+        )
+        g_zocalo_direct.direccion = 'Portal Hidalgo 12, Zócalo Centro, Puebla'
+        g_zocalo_direct.save(update_fields=['direccion'])
+
+        # Garage 2 matching "Zócalo" in address only
+        g_zocalo_address = self._create_approved_garage(
+            self.other_landlord,
+            'Pensión Reforma Sur',
+            '19.04280000',
+            '-98.19950000',
+            '30.00',
+        )
+        g_zocalo_address.direccion = 'Av. Reforma 108, a media cuadra del Zócalo'
+        g_zocalo_address.save(update_fields=['direccion'])
+
+        # Garage 3 with detailed street address to test fuzzy/similar street matching
+        g_insurgentes = self._create_approved_garage(
+            self.other_landlord,
+            'Cochera Parque Hundido',
+            '19.37124500',
+            '-99.17834200',
+            '45.00',
+        )
+        g_insurgentes.direccion = 'Avenida Insurgentes Sur 1450, Colonia Actipan'
+        g_insurgentes.save(update_fields=['direccion'])
+
+        self._auth_as(self.tenant.correo)
+
+        # 1. Searching "zocalo" (without accents) prioritizes both Zócalo garages FIRST even when user GPS is in Polanco, in 4 queries
+        with self.assertNumQueries(4):
+            res_zocalo = self.client.get('/cocheras?lat=19.43200000&lng=-99.19000000&q=zocalo')
+        self.assertEqual(res_zocalo.status_code, status.HTTP_200_OK)
+        top_two_ids = [item['id_cochera'] for item in res_zocalo.data['results'][:2]]
+        self.assertEqual(top_two_ids[0], g_zocalo_direct.id_cochera)
+        self.assertIn(g_zocalo_address.id_cochera, top_two_ids)
+        self.assertTrue(res_zocalo.data['results'][0]['es_recomendada'])
+        self.assertGreater(res_zocalo.data['results'][0]['similitud_busqueda'], 0.8)
+        self.assertFalse(res_zocalo.data['results'][-1]['es_recomendada'])
+
+        # 2. Typo / phonetic similarity ("socalo") still recommends Zócalo garages first
+        res_typo = self.client.get('/cocheras?lat=19.43200000&lng=-99.19000000&q=socalo')
+        self.assertEqual(res_typo.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            res_typo.data['results'][0]['id_cochera'],
+            {g_zocalo_direct.id_cochera, g_zocalo_address.id_cochera},
+        )
+        self.assertTrue(res_typo.data['results'][0]['es_recomendada'])
+
+        # 3. Similar abbreviated/slightly different street address ("Av. Insurgente 1448, Col Actipan") recommends g_insurgentes #1
+        res_similar_addr = self.client.get(
+            '/cocheras?lat=19.43200000&lng=-99.19000000&q=Av.%20Insurgente%201448%20Col%20Actipan'
+        )
+        self.assertEqual(res_similar_addr.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_similar_addr.data['results'][0]['id_cochera'], g_insurgentes.id_cochera)
+        self.assertTrue(res_similar_addr.data['results'][0]['es_recomendada'])
+
+        # 4. Pure text query `GET /cocheras?q=zocalo` without lat/lng also works for instant search suggestions
+        res_text_only = self.client.get('/api/v1/cocheras?q=zocalo')
+        self.assertEqual(res_text_only.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_text_only.data['results'][0]['id_cochera'], g_zocalo_direct.id_cochera)
+        self.assertTrue(res_text_only.data['results'][0]['es_recomendada'])

@@ -11,7 +11,7 @@ Memoria del proyecto entre sesiones. Máximo ~50 líneas: resume o elimina lo qu
 - **Módulo `04-qr-acceso` implementado, probado y APROBADO por `Reviewer`** (incluyendo Fase 5 con `GET/POST /reservas/simular-qr` y enriquecimiento de `GET /reservas/{id}/qr`; 17 tests en verde).
 - **Módulo `05-pagos-cobros` implementado, probado y APROBADO por `Reviewer`** (13 tests en verde).
 - **Módulo `06-quejas-sanciones-resenas` implementado, probado y APROBADO por `Reviewer`** (10 tests nuevos; 121/121 tests totales en verde, sin migraciones pendientes).
-- **Subida, persistencia y entrega de adjuntos (`docs` y `evidencias`) implementada y probada** (124/124 tests totales en verde, sin migraciones pendientes): `POST /archivos/subir`, soporte directo `multipart/form-data` en `POST /auth/registro` y `POST /sanciones/{id}/apelar`, servicio seguro `/media/<subpath>` y entrega de URLs/metadatos al `ADMIN` en `GET /admin/solicitudes`, `GET /admin/solicitudes/{id}`, `GET /admin/quejas` y `GET /admin/apelaciones/{id}`.
+- **Búsqueda inteligente por similitud en el explorador (`GET /cocheras?q=...`)**: Ranking difuso, fonético e insensible a acentos/abreviaturas viales (`similitud_busqueda`, `es_recomendada`) manteniendo 4 consultas SQL constantes, con recomendaciones instantáneas en `ExploreMapScreen.jsx` y `GaragePreviewCard.jsx`.
 
 ## Decisiones (y por qué)
 - **Alineación con la Constitución**: Lógica de negocio en backend Django/DRF, código en inglés, mensajes/documentación en español, TDD obligatorio.

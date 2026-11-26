@@ -87,11 +87,13 @@ class CocheraResponseSerializer(serializers.ModelSerializer):
 
 
 class CocheraSearchResultSerializer(serializers.ModelSerializer):
-    """Output serializer for geospatial garage search results (CU-04)."""
+    """Output serializer for geospatial and similarity garage search results (CU-04)."""
 
     distancia_km = serializers.FloatField(read_only=True)
     espacios_disponibles_ahora = serializers.IntegerField(read_only=True)
     abierta_ahora = serializers.BooleanField(read_only=True)
+    similitud_busqueda = serializers.FloatField(read_only=True, default=0.0)
+    es_recomendada = serializers.BooleanField(read_only=True, default=False)
     foto_principal = serializers.SerializerMethodField()
 
     class Meta:
@@ -109,6 +111,8 @@ class CocheraSearchResultSerializer(serializers.ModelSerializer):
             'abierta_ahora',
             'tipo_vehiculo',
             'foto_principal',
+            'similitud_busqueda',
+            'es_recomendada',
         ]
 
     def get_foto_principal(self, obj: Cochera) -> str | None:

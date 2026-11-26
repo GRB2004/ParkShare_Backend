@@ -52,6 +52,10 @@ class GarageListCreateView(APIView):
                 order_by=request.query_params.get('orden', 'cercania'),
                 radius_km=request.query_params.get('radio_km'),
                 vehicle_type=request.query_params.get('tipo_vehiculo'),
+                search_query=(
+                    request.query_params.get('q')
+                    or request.query_params.get('busqueda')
+                ),
             )
         except DomainValidationError as exc:
             return handle_domain_exception(exc)
