@@ -12,6 +12,7 @@ from .auth_views import (
     LoginView,
     MediaAttachmentServeView,
     RegisterView,
+    ResubmitLandlordDocumentsView,
 )
 from .claims_reviews_views import (
     AdminAppealResolveView,
@@ -53,6 +54,7 @@ __all__ = [
     'AttachmentUploadView',
     'MediaAttachmentServeView',
     'RegisterView',
+    'ResubmitLandlordDocumentsView',
     'LoginView',
     'AdminLandlordRequestListView',
     'AdminLandlordRequestDetailView',

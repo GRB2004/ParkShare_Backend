@@ -122,6 +122,15 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+for _media_subdir in ('docs', 'evidencias', 'cocheras'):
+    (MEDIA_ROOT / _media_subdir).mkdir(parents=True, exist_ok=True)
+
+# Límite máximo por archivo adjunto: 20 MB (30 MB en cuerpo HTTP para cubrir overhead de Base64/multipart)
+MAX_ATTACHMENT_SIZE_MB = 20
+MAX_ATTACHMENT_SIZE_BYTES = MAX_ATTACHMENT_SIZE_MB * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_ATTACHMENT_SIZE_BYTES
+DATA_UPLOAD_MAX_MEMORY_SIZE = 30 * 1024 * 1024
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = 'ParkShare_Backend.Usuario'

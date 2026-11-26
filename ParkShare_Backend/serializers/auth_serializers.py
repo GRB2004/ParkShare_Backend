@@ -32,6 +32,14 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
 
+class ResubmitLandlordDocumentsSerializer(serializers.Serializer):
+    """Input serializer for rejected landlords resubmitting corrected official documents (RN-08)."""
+
+    url_ine = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    url_csf = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    url_propiedad = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+
+
 class UserBaseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Usuario

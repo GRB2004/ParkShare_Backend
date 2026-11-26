@@ -1,3 +1,4 @@
+import base64
 from datetime import date, timedelta
 from pathlib import Path
 import tempfile
@@ -544,3 +545,151 @@ class AuthAPITests(APITestCase):
                 dl_resp = self.client.get(detail_resp.data['url_ine'])
                 self.assertEqual(dl_resp.status_code, status.HTTP_200_OK)
                 self.assertEqual(b''.join(dl_resp.streaming_content), ine_bytes)
+
+    def test_base64_json_pdf_upload_and_max_size_limit_enforcement(self):
+        pdf_bytes = b'%PDF-1.4\n%CONSTANCIA-ANDROID-BASE64\n%%EOF'
+        pdf_b64 = base64.b64encode(pdf_bytes).decode('ascii')
+
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(MEDIA_ROOT=Path(tmp_media), MEDIA_URL='/media/'):
+                # 1. Android Base64 JSON upload works and serves PDF with Content-Length
+                b64_resp = self.client.post(
+                    '/archivos/subir',
+                    {
+                        'carpeta': 'docs',
+                        'nombre_archivo': 'ine_constancia_bacm_01_dic_2025.pdf',
+                        'mime_type': 'application/pdf',
+                        'contenido_base64': pdf_b64,
+                    },
+                    format='json',
+                )
+                self.assertEqual(b64_resp.status_code, status.HTTP_201_CREATED)
+                self.assertTrue(b64_resp.data['url'].startswith('/media/docs/'))
+                self.assertTrue(b64_resp.data['url'].endswith('.pdf'))
+
+                served = self.client.get(b64_resp.data['url'])
+                self.assertEqual(served.status_code, status.HTTP_200_OK)
+                self.assertEqual(b''.join(served.streaming_content), pdf_bytes)
+                self.assertEqual(int(served['Content-Length']), len(pdf_bytes))
+                self.assertIn('application/pdf', served['Content-Type'])
+
+                # 2. Oversized file is strictly rejected with 400 in both multipart and Base64 JSON
+                oversized_bytes = b'%PDF-1.4\n' + (b'X' * 4096)
+                with override_settings(MAX_ATTACHMENT_SIZE_BYTES=2048):
+                    too_big_multipart = self.client.post(
+                        '/archivos/subir',
+                        {
+                            'carpeta': 'docs',
+                            'archivo': SimpleUploadedFile(
+                                'pesado.pdf',
+                                oversized_bytes,
+                                content_type='application/pdf',
+                            ),
+                        },
+                        format='multipart',
+                    )
+                    self.assertEqual(too_big_multipart.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIn('supera el tamaño máximo', too_big_multipart.data['detail'])
+
+                    too_big_b64 = self.client.post(
+                        '/archivos/subir',
+                        {
+                            'carpeta': 'docs',
+                            'nombre_archivo': 'pesado.pdf',
+                            'mime_type': 'application/pdf',
+                            'contenido_base64': base64.b64encode(oversized_bytes).decode('ascii'),
+                        },
+                        format='json',
+                    )
+                    self.assertEqual(too_big_b64.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIn('supera el tamaño máximo', too_big_b64.data['detail'])
+
+    def test_rejected_landlord_resubmits_corrected_documents_and_returns_to_pending_inbox(self):
+        with tempfile.TemporaryDirectory() as tmp_media:
+            with override_settings(MEDIA_ROOT=tmp_media):
+                pdf_bytes = b'%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n'
+
+                reg_resp = self.client.post(
+                    '/auth/registro',
+                    {
+                        'nombre_completo': 'Roberto Arrendador',
+                        'correo': 'roberto.rechazado@gmail.com',
+                        'telefono': '2223334455',
+                        'password': 'PasswordSegura123!',
+                        'fecha_nacimiento': '1995-04-10',
+                        'rol': 'ARRENDADOR',
+                        'archivo_ine': SimpleUploadedFile('ine1.pdf', pdf_bytes, content_type='application/pdf'),
+                        'archivo_csf': SimpleUploadedFile('csf1.pdf', pdf_bytes, content_type='application/pdf'),
+                        'archivo_propiedad': SimpleUploadedFile('prop1.pdf', pdf_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                )
+                self.assertEqual(reg_resp.status_code, status.HTTP_201_CREATED)
+                first_doc_id = reg_resp.data['documento']['id_documento']
+
+                # Admin rechaza la primera solicitud
+                admin_login = self.client.post(
+                    '/auth/login',
+                    {'correo': self.admin.correo, 'password': 'AdminPassword123!'},
+                    format='json',
+                )
+                admin_token = admin_login.data['access']
+                reject_resp = self.client.patch(
+                    f'/admin/solicitudes/{first_doc_id}',
+                    {
+                        'estado_verificacion': 'RECHAZADO',
+                        'motivo_rechazo': 'INE vencida',
+                    },
+                    format='json',
+                    HTTP_AUTHORIZATION=f'Bearer {admin_token}',
+                )
+                self.assertEqual(reject_resp.status_code, status.HTTP_200_OK)
+
+                # Arrendador rechazado inicia sesión y recibe estado RECHAZADA + motivo
+                host_login = self.client.post(
+                    '/auth/login',
+                    {'correo': 'roberto.rechazado@gmail.com', 'password': 'PasswordSegura123!'},
+                    format='json',
+                )
+                self.assertEqual(host_login.status_code, status.HTTP_200_OK)
+                self.assertEqual(host_login.data['usuario']['estado_cuenta'], 'RECHAZADA')
+                self.assertEqual(host_login.data['usuario']['motivo_rechazo'], 'INE vencida')
+                host_token = host_login.data['access']
+
+                # Arrendador reenvía únicamente los 3 documentos corregidos en POST /auth/reenviar-documentos
+                resubmit_resp = self.client.post(
+                    '/auth/reenviar-documentos',
+                    {
+                        'archivo_ine': SimpleUploadedFile('ine_vigente.pdf', pdf_bytes, content_type='application/pdf'),
+                        'archivo_csf': SimpleUploadedFile('csf_actualizada.pdf', pdf_bytes, content_type='application/pdf'),
+                        'archivo_propiedad': SimpleUploadedFile('prop_actualizada.pdf', pdf_bytes, content_type='application/pdf'),
+                    },
+                    format='multipart',
+                    HTTP_AUTHORIZATION=f'Bearer {host_token}',
+                )
+                self.assertEqual(resubmit_resp.status_code, status.HTTP_200_OK)
+                self.assertEqual(resubmit_resp.data['estado_cuenta'], 'PENDIENTE')
+                self.assertEqual(resubmit_resp.data['documento']['estado_verificacion'], 'PENDIENTE')
+                self.assertTrue(resubmit_resp.data['documento']['url_ine'].startswith('/media/docs/'))
+
+                # Verifica que en BD pasó a PENDIENTE y vuelve a aparecer en la bandeja del Administrador
+                pending_inbox = self.client.get(
+                    '/admin/solicitudes?estado=PENDIENTE',
+                    HTTP_AUTHORIZATION=f'Bearer {admin_token}',
+                )
+                self.assertEqual(pending_inbox.status_code, status.HTTP_200_OK)
+                pending_ids = [item['id_documento'] for item in pending_inbox.data['results']]
+                self.assertIn(resubmit_resp.data['documento']['id_documento'], pending_ids)
+
+                # Segundo intento mientras ya está PENDIENTE debe devolver 409 Conflict
+                duplicate_resp = self.client.post(
+                    '/auth/reenviar-documentos',
+                    {
+                        'url_ine': '/media/docs/ine_vigente.pdf',
+                        'url_csf': '/media/docs/csf_actualizada.pdf',
+                        'url_propiedad': '/media/docs/prop_actualizada.pdf',
+                    },
+                    format='json',
+                    HTTP_AUTHORIZATION=f'Bearer {host_token}',
+                )
+                self.assertEqual(duplicate_resp.status_code, status.HTTP_409_CONFLICT)

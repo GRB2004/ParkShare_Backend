@@ -30,6 +30,7 @@ from .views import (
     MediaAttachmentServeView,
     ProcessPaymentView,
     RegisterView,
+    ResubmitLandlordDocumentsView,
     ReservationCancelView,
     ReservationDetailUpdateView,
     ReservationListCreateView,
@@ -56,6 +57,16 @@ def get_api_urlpatterns(name_prefix: str = ''):
             name=f'{name_prefix}media-serve',
         ),
         re_path(r'^auth/registro/?$', RegisterView.as_view(), name=f'{name_prefix}auth-register'),
+        re_path(
+            r'^auth/reenviar-documentos/?$',
+            ResubmitLandlordDocumentsView.as_view(),
+            name=f'{name_prefix}auth-reenviar-documentos',
+        ),
+        re_path(
+            r'^arrendador/documentos/?$',
+            ResubmitLandlordDocumentsView.as_view(),
+            name=f'{name_prefix}arrendador-documentos',
+        ),
         re_path(r'^auth/login/?$', LoginView.as_view(), name=f'{name_prefix}auth-login'),
         re_path(
             r'^admin/solicitudes/?$',

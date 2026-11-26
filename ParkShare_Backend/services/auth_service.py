@@ -1,3 +1,5 @@
+import base64
+import binascii
 import os
 from pathlib import Path
 import re
@@ -7,6 +9,7 @@ import uuid
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.base import ContentFile
 from django.core.files.storage import FileSystemStorage
 from django.db import transaction
 from django.utils import timezone
@@ -29,7 +32,7 @@ REJECTION_REASON_CATALOG = (
     'Otro',
 )
 
-MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
 FOLDER_ALLOWED_EXTENSIONS: dict[str, tuple[str, ...]] = {
     'docs': ('.pdf', '.jpg', '.jpeg', '.png'),
     'evidencias': ('.pdf', '.jpg', '.jpeg', '.png', '.webp'),
@@ -362,6 +365,72 @@ def suspend_account(target_user_id: int, admin_user: Usuario, reason: str) -> Su
     return suspension
 
 
+def _get_max_attachment_size_bytes() -> int:
+    return int(getattr(settings, 'MAX_ATTACHMENT_SIZE_BYTES', DEFAULT_MAX_ATTACHMENT_SIZE_BYTES))
+
+
+def _format_max_size_label(max_bytes: int) -> str:
+    if max_bytes >= 1024 * 1024 and max_bytes % (1024 * 1024) == 0:
+        return f'{max_bytes // (1024 * 1024)} MB'
+    if max_bytes >= 1024 * 1024:
+        return f'{max_bytes / (1024 * 1024):.1f} MB'
+    if max_bytes >= 1024:
+        return f'{max_bytes // 1024} KB'
+    return f'{max_bytes} bytes'
+
+
+def build_uploaded_file_from_base64(
+    base64_content: str,
+    filename: str = 'documento.pdf',
+    mime_type: str | None = None,
+) -> ContentFile:
+    """Decode a Base64 payload from mobile clients into a Django ContentFile enforcing size limits."""
+    if not isinstance(base64_content, str) or not base64_content.strip():
+        raise DomainValidationError(
+            'Debes adjuntar un archivo válido.',
+            errors={'archivo': ['El contenido del archivo es obligatorio.']},
+        )
+
+    cleaned_b64 = base64_content.strip()
+    if cleaned_b64.startswith('data:') and ',' in cleaned_b64:
+        header, cleaned_b64 = cleaned_b64.split(',', 1)
+        if not mime_type and ';' in header:
+            mime_type = header[5:].split(';', 1)[0].strip()
+
+    max_bytes = _get_max_attachment_size_bytes()
+    max_label = _format_max_size_label(max_bytes)
+    # Fast pre-check before allocating decoded buffer (~4/3 Base64 expansion + whitespace tolerance)
+    if len(cleaned_b64) > int(max_bytes * 1.4) + 1024:
+        raise DomainValidationError(
+            f'El archivo adjunto supera el tamaño máximo permitido de {max_label}.',
+            errors={'archivo': [f'El tamaño máximo permitido por archivo es de {max_label}.']},
+        )
+
+    try:
+        raw_bytes = base64.b64decode(cleaned_b64, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise DomainValidationError(
+            'No se pudo decodificar el archivo adjunto enviado.',
+            errors={'archivo': ['Codificación Base64 inválida.']},
+        ) from exc
+
+    if not raw_bytes:
+        raise DomainValidationError(
+            'El archivo adjunto está vacío.',
+            errors={'archivo': ['Selecciona un archivo con contenido válido.']},
+        )
+    if len(raw_bytes) > max_bytes:
+        raise DomainValidationError(
+            f'El archivo adjunto supera el tamaño máximo permitido de {max_label}.',
+            errors={'archivo': [f'El tamaño máximo permitido por archivo es de {max_label}.']},
+        )
+
+    content_file = ContentFile(raw_bytes, name=(filename or 'documento').strip() or 'documento')
+    if mime_type:
+        content_file.content_type = mime_type.strip()
+    return content_file
+
+
 def save_uploaded_attachment(
     uploaded_file,
     folder: str = 'docs',
@@ -381,16 +450,18 @@ def save_uploaded_attachment(
             errors={'carpeta': [f'Valores permitidos: {", ".join(FOLDER_ALLOWED_EXTENSIONS.keys())}.']},
         )
 
+    max_bytes = _get_max_attachment_size_bytes()
+    max_label = _format_max_size_label(max_bytes)
     file_size = getattr(uploaded_file, 'size', None)
     if file_size is None or file_size <= 0:
         raise DomainValidationError(
             'El archivo adjunto está vacío.',
             errors={'archivo': ['Selecciona un archivo con contenido válido.']},
         )
-    if file_size > MAX_ATTACHMENT_SIZE_BYTES:
+    if file_size > max_bytes:
         raise DomainValidationError(
-            'El archivo adjunto supera el tamaño máximo permitido de 10 MB.',
-            errors={'archivo': ['El tamaño máximo permitido por archivo es de 10 MB.']},
+            f'El archivo adjunto supera el tamaño máximo permitido de {max_label}.',
+            errors={'archivo': [f'El tamaño máximo permitido por archivo es de {max_label}.']},
         )
 
     original_name = os.path.basename(str(getattr(uploaded_file, 'name', '') or '').strip())
@@ -464,3 +535,51 @@ def delete_saved_attachment_by_url(relative_url: str | None) -> None:
         path.unlink(missing_ok=True)
     except (NotFoundError, OSError):
         return
+
+
+def resubmit_landlord_documents(user: Usuario, data: dict) -> dict:
+    """Allow a RECHAZADA landlord to submit corrected documents and transition back to PENDIENTE (RN-08)."""
+    if user is None or not getattr(user, 'is_authenticated', False):
+        raise AuthenticationError('Debes iniciar sesión para reenviar tus documentos.')
+
+    if user.rol != UserRole.ARRENDADOR:
+        raise PermissionDeniedError('Solo las cuentas de arrendador pueden reenviar documentación.')
+
+    if user.estado_cuenta == AccountStatus.SUSPENDIDA:
+        raise AccountSuspendedError('Tu cuenta se encuentra suspendida y no puede enviar solicitudes.')
+
+    if user.estado_cuenta != AccountStatus.RECHAZADA:
+        raise ConflictError(
+            'Solo puedes reenviar documentos cuando tu solicitud haya sido rechazada.'
+        )
+
+    new_document = _build_and_validate_landlord_document(data)
+
+    with transaction.atomic():
+        locked_user = (
+            Usuario.objects.select_for_update()
+            .filter(id_usuario=user.id_usuario)
+            .first()
+        )
+        if locked_user is None:
+            raise NotFoundError('Usuario no encontrado.')
+
+        if locked_user.estado_cuenta == AccountStatus.SUSPENDIDA:
+            raise AccountSuspendedError(
+                'Tu cuenta se encuentra suspendida y no puede enviar solicitudes.'
+            )
+
+        if locked_user.estado_cuenta != AccountStatus.RECHAZADA:
+            raise ConflictError(
+                'Solo puedes reenviar documentos cuando tu solicitud haya sido rechazada.'
+            )
+
+        new_document.arrendador = locked_user
+        new_document.estado_verificacion = VerificationStatus.PENDIENTE
+        new_document.motivo_rechazo = None
+        new_document.save()
+
+        locked_user.estado_cuenta = AccountStatus.PENDIENTE
+        locked_user.save(update_fields=['estado_cuenta', 'is_active'])
+
+    return {'usuario': locked_user, 'documento': new_document}
