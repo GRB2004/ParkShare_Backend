@@ -235,6 +235,97 @@ class ReviewsAndComplaintsAPITests(APITestCase):
         self.assertEqual(res_host.data['calificacion'], 4)
         self.assertEqual(Resena.objects.filter(reserva=r_done).count(), 2)
 
+    def test_get_arrendador_resenas_average_distribution_filtering_and_guards(self):
+        r1 = self._create_reservation(ReservationStatus.FINALIZADA)
+        r2 = Reserva.objects.create(
+            arrendatario=self.other_tenant,
+            cochera=self.garage,
+            fecha_hora_inicio=self.start_dt + timedelta(days=1),
+            fecha_hora_fin=self.end_dt + timedelta(days=1),
+            monto_base=Decimal('80.00'),
+            monto_penalizacion=Decimal('0.00'),
+            estado=ReservationStatus.FINALIZADA,
+        )
+
+        # Unauthenticated -> 401
+        self.client.credentials()
+        self.assertEqual(
+            self.client.get('/arrendador/resenas').status_code,
+            status.HTTP_401_UNAUTHORIZED,
+        )
+
+        # Tenant or Admin -> 403
+        for forbidden_email in (self.tenant.correo, self.admin.correo):
+            self._auth_as(forbidden_email)
+            self.assertEqual(
+                self.client.get('/arrendador/resenas').status_code,
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        # Empty landlord -> 0.0 average and 0 total
+        self._auth_as(self.other_landlord.correo)
+        res_empty = self.client.get('/arrendador/resenas')
+        self.assertEqual(res_empty.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_empty.data['promedio_calificacion'], 0.0)
+        self.assertEqual(res_empty.data['total_resenas'], 0)
+        self.assertEqual(res_empty.data['resenas'], [])
+
+        # Create 2 tenant->landlord reviews (5 and 4) + 1 landlord->tenant review (2, must NOT count toward landlord's received average)
+        self._auth_as(self.tenant.correo)
+        self.client.post(
+            f'/reservas/{r1.id_reserva}/resenas',
+            {
+                'calificacion': 5,
+                'etiquetas': 'Puntual,Buen trato',
+                'comentario': 'Excelente anfitrión.',
+            },
+            format='json',
+        )
+        self._auth_as(self.other_tenant.correo)
+        self.client.post(
+            f'/reservas/{r2.id_reserva}/resenas',
+            {
+                'calificacion': 4,
+                'comentario': 'Muy buena cochera.',
+            },
+            format='json',
+        )
+        self._auth_as(self.landlord.correo)
+        self.client.post(
+            f'/reservas/{r1.id_reserva}/resenas',
+            {'calificacion': 2, 'comentario': 'Salió un poco tarde.'},
+            format='json',
+        )
+
+        # Invalid star filter -> 400
+        for bad_q in ('0', '6', 'abc'):
+            self.assertEqual(
+                self.client.get(f'/arrendador/resenas?calificacion={bad_q}').status_code,
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Landlord fetches full summary -> average (5 + 4)/2 = 4.5, total = 2
+        res_all = self.client.get('/api/v1/arrendador/resenas')
+        self.assertEqual(res_all.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_all.data['promedio_calificacion'], 4.5)
+        self.assertEqual(res_all.data['total_resenas'], 2)
+        self.assertEqual(res_all.data['distribucion']['5'], 1)
+        self.assertEqual(res_all.data['distribucion']['4'], 1)
+        self.assertEqual(len(res_all.data['resenas']), 2)
+        self.assertEqual(res_all.data['resenas'][0]['cochera_nombre'], 'Cochera Los Pinos')
+
+        # Filtered by 5 stars keeps global average 4.5 while returning only the 5-star review
+        res_five = self.client.get('/arrendador/resenas?calificacion=5')
+        self.assertEqual(res_five.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_five.data['promedio_calificacion'], 4.5)
+        self.assertEqual(res_five.data['total_resenas'], 2)
+        self.assertEqual(len(res_five.data['resenas']), 1)
+        self.assertEqual(res_five.data['resenas'][0]['calificacion'], 5)
+        self.assertEqual(
+            res_five.data['resenas'][0]['autor']['nombre_completo'],
+            self.tenant.nombre_completo,
+        )
+
     # --- POST /quejas ---
 
     def test_post_quejas_valid_states_201_and_error_guards(self):

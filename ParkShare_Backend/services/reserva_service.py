@@ -312,14 +312,14 @@ def create_reservation(
 
         validate_schedule_coverage(garage, aware_start, aware_end)
 
-        overlapping_count = Reserva.objects.filter(
+        active_occupied_count = Reserva.objects.filter(
             cochera=garage,
             estado__in=ACTIVE_RESERVATION_STATUSES,
-            fecha_hora_inicio__lt=aware_end,
-            fecha_hora_fin__gt=aware_start,
         ).count()
-        if overlapping_count >= garage.espacios_totales:
-            raise ConflictError('No hay espacios disponibles para el horario seleccionado.')
+        if active_occupied_count >= garage.espacios_totales:
+            raise ConflictError(
+                'No hay espacios disponibles en esta cochera hasta que se desocupe o se cancele una reservación activa.'
+            )
 
         base_amount = calculate_base_amount(garage.tarifa_hora, duration_minutes)
         return Reserva.objects.create(

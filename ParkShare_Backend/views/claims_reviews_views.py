@@ -36,7 +36,10 @@ from ParkShare_Backend.services.claim_sanction_service import (
     resolve_complaint,
     submit_appeal,
 )
-from ParkShare_Backend.services.review_service import create_review
+from ParkShare_Backend.services.review_service import (
+    create_review,
+    list_landlord_received_reviews,
+)
 from ParkShare_Backend.views.auth_views import (
     handle_domain_exception,
     validation_error_response,
@@ -183,6 +186,24 @@ class AdminComplaintDetailResolveView(APIView):
             NotFoundError,
             ConflictError,
         ) as exc:
+            return handle_domain_exception(exc)
+
+
+class LandlordReceivedReviewsView(APIView):
+    """GET /arrendador/resenas — Summary average and list of user reviews received by landlord."""
+
+    permission_classes = [IsAuthenticated, IsActiveAccount]
+
+    def get(self, request):
+        try:
+            result = list_landlord_received_reviews(
+                host_user=request.user,
+                calificacion_filter=request.query_params.get('calificacion'),
+            )
+            for item in result.get('resenas', []):
+                _format_iso_fields(item, ('fecha',))
+            return Response(result, status=status.HTTP_200_OK)
+        except (DomainValidationError, PermissionDeniedError) as exc:
             return handle_domain_exception(exc)
 
 

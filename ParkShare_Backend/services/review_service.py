@@ -75,6 +75,101 @@ def validate_review_payload(
     return calificacion, cleaned_tags, cleaned_comment
 
 
+def _check_active_landlord_for_reviews(user: Usuario) -> None:
+    if (
+        not user
+        or not getattr(user, 'is_authenticated', False)
+        or user.rol != UserRole.ARRENDADOR
+        or user.estado_cuenta != AccountStatus.ACTIVA
+    ):
+        raise PermissionDeniedError(
+            'Solo un arrendador con cuenta activa puede consultar sus calificaciones recibidas.'
+        )
+
+
+def list_landlord_received_reviews(
+    host_user: Usuario,
+    calificacion_filter: str | None = None,
+) -> dict:
+    """Return average rating, star distribution, and tenant reviews received by the landlord."""
+    _check_active_landlord_for_reviews(host_user)
+
+    parsed_star_filter: int | None = None
+    if calificacion_filter is not None and str(calificacion_filter).strip() != '':
+        raw_val = str(calificacion_filter).strip()
+        if not raw_val.isdigit():
+            raise DomainValidationError(
+                'El filtro de calificación debe ser un número entero entre 1 y 5.',
+                errors={'calificacion': ['Ingresa un valor entero entre 1 y 5.']},
+            )
+        parsed_star_filter = int(raw_val)
+        if parsed_star_filter < 1 or parsed_star_filter > 5:
+            raise DomainValidationError(
+                'El filtro de calificación debe estar entre 1 y 5 estrellas.',
+                errors={'calificacion': ['El filtro debe estar entre 1 y 5.']},
+            )
+
+    all_reviews = list(
+        Resena.objects.select_related('autor', 'reserva', 'reserva__cochera')
+        .filter(destinatario=host_user)
+        .exclude(autor=host_user)
+        .order_by('-fecha', '-id_resena')
+    )
+
+    total_resenas = len(all_reviews)
+    distribucion = {'5': 0, '4': 0, '3': 0, '2': 0, '1': 0}
+    score_sum = 0
+    for rev in all_reviews:
+        key = str(rev.calificacion)
+        if key in distribucion:
+            distribucion[key] += 1
+        score_sum += int(rev.calificacion)
+
+    promedio_calificacion = (
+        round(score_sum / total_resenas, 1) if total_resenas > 0 else 0.0
+    )
+
+    filtered_reviews = (
+        [rev for rev in all_reviews if rev.calificacion == parsed_star_filter]
+        if parsed_star_filter is not None
+        else all_reviews
+    )
+
+    items = []
+    for rev in filtered_reviews:
+        reserva = rev.reserva
+        cochera = reserva.cochera if reserva is not None else None
+        autor = rev.autor
+        items.append(
+            {
+                'id_resena': rev.id_resena,
+                'reserva_id': rev.reserva_id,
+                'calificacion': rev.calificacion,
+                'etiquetas': rev.etiquetas,
+                'comentario': rev.comentario,
+                'fecha': rev.fecha,
+                'cochera_id': reserva.cochera_id if reserva is not None else None,
+                'cochera_nombre': cochera.nombre if cochera is not None else 'Cochera',
+                'autor': {
+                    'id_usuario': rev.autor_id,
+                    'nombre_completo': (
+                        autor.nombre_completo if autor is not None else 'Conductor'
+                    ),
+                    'modelo_vehiculo': (
+                        autor.modelo_vehiculo if autor is not None else None
+                    ),
+                },
+            }
+        )
+
+    return {
+        'promedio_calificacion': promedio_calificacion,
+        'total_resenas': total_resenas,
+        'distribucion': distribucion,
+        'resenas': items,
+    }
+
+
 def create_review(
     reservation_id: int,
     author: Usuario,

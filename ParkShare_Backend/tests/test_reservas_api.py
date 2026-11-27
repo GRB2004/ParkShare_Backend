@@ -156,15 +156,26 @@ class ReservasAPITests(APITestCase):
             status.HTTP_409_CONFLICT,
         )
 
-        # Contiguous slot via /api/v1/ mirror succeeds
+        # Contiguous/later slot (e.g., User A 13:30-14:30 -> User B 14:30-15:00) ALSO fails with 409
+        # while User A's reservation has not been vacated or cancelled
         contiguous_payload = {
             'cochera_id': self.garage.id_cochera,
             'fecha_hora_inicio': self.future_end.isoformat(),
             'fecha_hora_fin': (self.future_end + timedelta(minutes=30)).isoformat(),
         }
+        res_v1_blocked = self.client.post('/api/v1/reservas', contiguous_payload, format='json')
+        self.assertEqual(res_v1_blocked.status_code, status.HTTP_409_CONFLICT)
+
+        # Once User A cancels, the space is freed and User B can reserve via /api/v1/reservas
+        self._auth_as(self.tenant.correo)
+        cancel_res = self.client.post(f'/reservas/{res.data["id_reserva"]}/cancelar', {}, format='json')
+        self.assertEqual(cancel_res.status_code, status.HTTP_200_OK)
+
+        self._auth_as(self.other_tenant.correo)
         res_v1 = self.client.post('/api/v1/reservas', contiguous_payload, format='json')
         self.assertEqual(res_v1.status_code, status.HTTP_201_CREATED)
         self.assertEqual(res_v1.data['monto_base'], '22.50')
+        self.client.post(f'/reservas/{res_v1.data["id_reserva"]}/cancelar', {}, format='json')
 
         # RN-01 invalid durations -> 400
         self._auth_as(self.tenant.correo)
@@ -381,24 +392,41 @@ class ReservasAPITests(APITestCase):
     # --- Integration with GET /cocheras ---
 
     def test_active_reservation_reduces_realtime_spaces_in_cocheras_search(self):
-        multi_garage = self._create_garage(self.landlord, spaces=2, rate='50.00')
-        now_dt = timezone.now()
-        Reserva.objects.create(
-            arrendatario=self.tenant,
-            cochera=multi_garage,
-            fecha_hora_inicio=now_dt - timedelta(minutes=15),
-            fecha_hora_fin=now_dt + timedelta(minutes=45),
-            monto_base=Decimal('50.00'),
-            estado=ReservationStatus.CONFIRMADA,
-        )
-
+        multi_garage = self._create_garage(self.landlord, spaces=50, rate='50.00')
         self._auth_as(self.tenant.correo)
+
+        # Before reserving: 50 available
+        before_search = self.client.get('/cocheras?lat=19.37124500&lng=-99.17834200')
+        by_id_before = {item['id_cochera']: item for item in before_search.data['results']}
+        self.assertEqual(by_id_before[multi_garage.id_cochera]['espacios_disponibles_ahora'], 50)
+
+        # Create reservation for a FUTURE window -> immediately decrements 50 -> 49 at booking time
+        create_res = self.client.post(
+            '/reservas',
+            {
+                'cochera_id': multi_garage.id_cochera,
+                'fecha_hora_inicio': self.future_start.isoformat(),
+                'fecha_hora_fin': self.future_end.isoformat(),
+            },
+            format='json',
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        rsv_id = create_res.data['id_reserva']
+
         with self.assertNumQueries(4):
             res_search = self.client.get('/cocheras?lat=19.37124500&lng=-99.17834200')
 
         self.assertEqual(res_search.status_code, status.HTTP_200_OK)
         by_id = {item['id_cochera']: item for item in res_search.data['results']}
-        self.assertEqual(by_id[multi_garage.id_cochera]['espacios_disponibles_ahora'], 1)
+        self.assertEqual(by_id[multi_garage.id_cochera]['espacios_disponibles_ahora'], 49)
+        self.assertEqual(by_id[multi_garage.id_cochera]['espacios_ocupados_ahora'], 1)
+
+        # Cancel reservation -> immediately increments 49 -> 50
+        self.client.post(f'/reservas/{rsv_id}/cancelar', {}, format='json')
+        after_cancel_detail = self.client.get(f'/cocheras/{multi_garage.id_cochera}')
+        self.assertEqual(after_cancel_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(after_cancel_detail.data['espacios_disponibles_ahora'], 50)
+        self.assertEqual(after_cancel_detail.data['espacios_ocupados_ahora'], 0)
 
     def test_rn08_single_active_reservation_api(self):
         self._auth_as(self.tenant.correo)

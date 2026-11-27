@@ -337,13 +337,9 @@ def validate_availability_slots(slots) -> list[dict]:
     return cleaned_slots
 
 
-def _active_occupancy_q(check_dt: datetime) -> Q:
-    """Match any EN_USO stay plus SOLICITADA/CONFIRMADA reservations overlapping check_dt."""
-    return Q(estado=ReservationStatus.EN_USO) | Q(
-        estado__in=(ReservationStatus.SOLICITADA, ReservationStatus.CONFIRMADA),
-        fecha_hora_inicio__lte=check_dt,
-        fecha_hora_fin__gt=check_dt,
-    )
+def _active_occupancy_q(check_dt: datetime | None = None) -> Q:
+    """Match any active reservation (SOLICITADA, CONFIRMADA, EN_USO) holding a garage space immediately upon booking."""
+    return Q(estado__in=ACTIVE_RESERVATION_STATUSES)
 
 
 def get_active_reservations_count(garage: Cochera, reference_dt: datetime | None = None) -> int:

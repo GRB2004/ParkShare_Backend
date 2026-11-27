@@ -24,6 +24,7 @@ from .views import (
     HostEarningsView,
     HostWithdrawView,
     LandlordGarageListView,
+    LandlordReceivedReviewsView,
     LandlordSanctionDetailView,
     LandlordSanctionListView,
     LoginView,
@@ -182,6 +183,11 @@ def get_api_urlpatterns(name_prefix: str = ''):
             r'^admin/quejas/(?P<pk>\d+)/?$',
             AdminComplaintDetailResolveView.as_view(),
             name=f'{name_prefix}admin-quejas-detail',
+        ),
+        re_path(
+            r'^arrendador/resenas/?$',
+            LandlordReceivedReviewsView.as_view(),
+            name=f'{name_prefix}arrendador-resenas-list',
         ),
         re_path(
             r'^arrendador/sanciones/?$',

@@ -49,10 +49,11 @@ Este módulo implementa el ciclo de vida completo de las reservaciones de espaci
 2. **Validación contra `disponibilidad`** (en zona horaria `America/Mexico_City`):
    - **Reserva en el mismo día calendario**: debe existir una franja en `disponibilidad` para el `dia_semana` correspondiente tal que `hora_inicio <= inicio.time()` y `fin.time() <= hora_fin`.
    - **Reserva que cruza medianoche (hasta 24 h)**: el día inicial $D$ debe tener cobertura hasta el cierre del día (`hora_fin >= 23:59:00`) desde `inicio.time()`, y el día siguiente $D+1$ debe tener cobertura desde apertura (`hora_inicio == 00:00:00`) hasta `fin.time()`. (Si dura exactamente 24 h desde las `00:00`, el día $D$ debe cubrir `00:00` a `23:59`).
-3. **Verificación de cupo (`espacios_totales`)**:
-   - Estados que ocupan un cajón en un intervalo: `('SOLICITADA', 'CONFIRMADA', 'EN_USO')`.
-   - Dos intervalos $[A_{\text{ini}}, A_{\text{fin}})$ y $[B_{\text{ini}}, B_{\text{fin}})$ se traslapan si y solo si $A_{\text{ini}} < B_{\text{fin}} \land A_{\text{fin}} > B_{\text{ini}}$ (reservas contiguas como `10:00-11:00` y `11:00-12:00` **no** se traslapan).
-   - El conteo se realiza dentro de `transaction.atomic()` bloqueando la fila de `cochera` con `select_for_update()`. Debe cumplirse `reservas_traslapadas < cochera.espacios_totales`.
+3. **Verificación de cupo (`espacios_totales`) y descuento inmediato**:
+   - Estados que ocupan un cajón físico desde el instante en que se crea la reservación: `('SOLICITADA', 'CONFIRMADA', 'EN_USO')`.
+   - Al crearse una reservación (`POST /reservas`), `espacios_disponibles_ahora` disminuye de inmediato en `1` (ej. `50 -> 49` o `1 -> 0`), sin esperar a que llegue `fecha_hora_inicio`, y solo vuelve a incrementarse (`+1`) cuando la reservación pasa a un estado terminal (`'FINALIZADA'`, `'CANCELADA'` o `'EXPIRADA'`).
+   - Mientras todos los cajones estén reservados u ocupados (`reservas_activas_cochera >= cochera.espacios_totales`), **no se permite crear otra reservación ni siquiera para un horario contiguo/posterior** (ej. si en una cochera de `1` cajón el Usuario A reservó `13:30-14:30`, el Usuario B no puede reservar `14:30-15:30` hasta que el Usuario A desocupe o cancele su reserva).
+   - El conteo `Reserva.objects.filter(cochera=garage, estado__in=('SOLICITADA', 'CONFIRMADA', 'EN_USO')).count()` se realiza dentro de `transaction.atomic()` bloqueando la fila de `cochera` con `select_for_update()`. Debe cumplirse `reservas_activas_cochera < cochera.espacios_totales`.
 4. **Prohibición de auto-reserva y reserva en el pasado**:
    - `fecha_hora_inicio` debe ser `>= timezone.now()`.
    - El dueño de la cochera (`cochera.arrendador_id == usuario.id_usuario`) no puede reservar su propia cochera (`400 Bad Request` / `403 Forbidden`).
@@ -321,7 +322,7 @@ cochera (1) ──────< (N) reserva
 6. **Cancelación tardía (`RN-05`)**: Reserva `CONFIRMADA` cancelada a los 10 min 01 s (o 25 min) de `fecha_creacion` -> `estado='CANCELADA'`, `monto_penalizacion='100.00'`.
 7. **Listados por rol y vista (`GET /reservas`)**: Arrendatario ve `proximas` y `anteriores`; Arrendador ve `proximas_llegadas` y `en_uso` exclusivamente de sus cocheras.
 8. **Detalle con cálculo en vivo (`GET /reservas/{id}`)**: Reserva `EN_USO` muestra `tiempo_restante_minutos`, `en_tolerancia` o `minutos_retraso_actual` y `recargo_estimado_actual` correctos.
-9. **Integración con `02-cocheras`**: Una reserva `CONFIRMADA`/`EN_USO` vigente reduce `espacios_disponibles_ahora` en `GET /cocheras`.
+9. **Integración inmediata con `02-cocheras`**: Desde el instante en que se crea una reserva (`SOLICITADA`, `CONFIRMADA` o `EN_USO`), `espacios_disponibles_ahora` disminuye de inmediato en `1` (ej. `50 -> 49`) en `GET /cocheras` y `GET /cocheras/{id}`, y se incrementa de inmediato (`49 -> 50`) cuando pasa a `FINALIZADA`, `CANCELADA` o `EXPIRADA`.
 10. **Entrada dentro de tolerancia (`RN-07`)**: Reserva `CONFIRMADA` con `fecha_hora_inicio = 14:00` registra entrada a las `14:15:00` o exactamente a las `14:20:00` (`PATCH /reservas/{id}` y `POST /reservas/validar` con QR de `ENTRADA`) -> transiciona a `EN_USO` con `monto_penalizacion = '0.00'`.
 11. **Nueva reserva tras concluir reserva previa (`RN-08`)**: Cuando la primera reserva de un arrendatario pasa a `FINALIZADA`, `CANCELADA` o `EXPIRADA`, el mismo arrendatario puede crear una nueva reserva (`201 Created`).
 
@@ -357,7 +358,7 @@ cochera (1) ──────< (N) reserva
 4. **Frontera exacta de `RN-07` (llegada tardía)**:
    - Entrada a `fecha_hora_inicio + 20 min 00 s` (`14:20:00`): aceptada (`EN_USO`, `monto_penalizacion = 0.00`).
    - Entrada a `fecha_hora_inicio + 20 min 01 s` (`14:20:01`): cancelación automática persistida en BD (`estado = 'CANCELADA'`, `monto_penalizacion = 100.00`) y respuesta `409 Conflict` (y en `POST /reservas/validar` si `now > qr.expiracion` = `fecha_hora_fin`, se respeta `410 Gone`).
-5. **Reservas contiguas sin traslape**: En cochera con `espacios_totales = 1`, reserva `10:00-11:00` (arrendatario A) y reserva `11:00-12:00` (arrendatario B, o mismo arrendatario A tras concluir/cancelar la primera) **no** chocan (`201 Created`).
+5. **Bloqueo de reserva contigua mientras cajón sigue reservado u ocupado**: En cochera con `espacios_totales = 1`, si el arrendatario A reserva `13:30-14:30`, el arrendatario B recibe `409 Conflict` al intentar reservar `14:30-15:30` mientras la reserva A siga en `SOLICITADA`, `CONFIRMADA` o `EN_USO`; una vez que la reserva A pasa a `FINALIZADA`, `CANCELADA` o `EXPIRADA`, el arrendatario B sí puede reservar (`201 Created`).
 6. **Reservas canceladas o expiradas liberan cupo**: Si 1 de 1 cajones tenía reserva `CANCELADA` o `EXPIRADA` en `10:00-12:00`, una nueva reserva en `10:00-12:00` sí procede (`201 Created`).
 7. **Reserva nocturna cruzando medianoche**: Reserva de `22:00` (Viernes) a `02:00` (Sábado) pasa validación si `V` cubre hasta `23:59` y `S` inicia en `00:00` hasta al menos `02:00`.
 8. **Concurrencia real en último cajón y en `RN-08`**:

@@ -210,7 +210,29 @@ class ReservaTransactionalServicesTests(TestCase):
                 now=self.now,
             )
 
-        # Contiguous [11:30, 12:30) succeeds
+        # Contiguous/later slot [11:30, 12:30) ALSO fails while r1 has not been vacated or cancelled
+        with self.assertRaises(ConflictError):
+            create_reservation(
+                self.other_tenant,
+                garage.id_cochera,
+                datetime(2026, 11, 23, 11, 30, tzinfo=MEXICO_TZ),
+                datetime(2026, 11, 23, 12, 30, tzinfo=MEXICO_TZ),
+                now=self.now,
+            )
+
+        # Even if r1 is confirmed and in use (e.g., 13:30-14:30), User B still cannot book 14:30-15:30
+        confirm_reservation(r1.id_reserva, by_system=True, now=self.now)
+        with self.assertRaises(ConflictError):
+            create_reservation(
+                self.other_tenant,
+                garage.id_cochera,
+                datetime(2026, 11, 23, 11, 30, tzinfo=MEXICO_TZ),
+                datetime(2026, 11, 23, 12, 30, tzinfo=MEXICO_TZ),
+                now=self.now,
+            )
+
+        # Once r1 is cancelled (or finalized), the space is freed and User B can book [11:30, 12:30)
+        cancel_reservation(r1.id_reserva, self.tenant, now=self.now)
         r2 = create_reservation(
             self.other_tenant,
             garage.id_cochera,
@@ -220,8 +242,19 @@ class ReservaTransactionalServicesTests(TestCase):
         )
         self.assertEqual(r2.monto_base, Decimal('45.00'))
 
-        # After canceling r1, [10:00, 11:30) is freed for self.tenant (who now has no active reservation)
-        cancel_reservation(r1.id_reserva, self.tenant, now=self.now)
+        # Once User B vacates (EN_USO -> FINALIZADA), self.tenant can book again
+        confirm_reservation(r2.id_reserva, by_system=True, now=self.now)
+        start_reservation_usage(
+            r2.id_reserva,
+            self.landlord,
+            now=datetime(2026, 11, 23, 11, 35, tzinfo=MEXICO_TZ),
+        )
+        finish_reservation(
+            r2.id_reserva,
+            self.landlord,
+            real_checkout_dt=datetime(2026, 11, 23, 12, 20, tzinfo=MEXICO_TZ),
+            now=datetime(2026, 11, 23, 12, 20, tzinfo=MEXICO_TZ),
+        )
         r3 = create_reservation(self.tenant, garage.id_cochera, start, end, now=self.now)
         self.assertEqual(r3.estado, ReservationStatus.SOLICITADA)
 
@@ -375,31 +408,46 @@ class ReservaTransactionalServicesTests(TestCase):
             cancel_reservation(finished.id_reserva, self.admin, now=end)
 
     def test_integration_with_cochera_realtime_occupancy(self):
-        garage = _create_garage_with_schedule(self.landlord, spaces=2, rate='45.00')
-        start = datetime(2026, 11, 23, 10, 0, tzinfo=MEXICO_TZ)
-        end = datetime(2026, 11, 23, 12, 0, tzinfo=MEXICO_TZ)
+        garage = _create_garage_with_schedule(self.landlord, spaces=50, rate='45.00')
+        start = datetime(2026, 11, 23, 13, 30, tzinfo=MEXICO_TZ)
+        end = datetime(2026, 11, 23, 14, 30, tzinfo=MEXICO_TZ)
 
-        is_open, free_before = evaluate_garage_realtime_availability(garage, start)
+        is_open, free_before = evaluate_garage_realtime_availability(garage, self.now)
         self.assertTrue(is_open)
-        self.assertEqual(free_before, 2)
+        self.assertEqual(free_before, 50)
 
+        # Immediately at reservation creation (08:00, hours before 13:30 start), 50 decrements to 49
         r1 = create_reservation(self.tenant, garage.id_cochera, start, end, now=self.now)
-        confirm_reservation(r1.id_reserva, by_system=True)
-
-        # During [10:00, 12:00), occupied = 1 -> remaining = 1
-        _, free_during = evaluate_garage_realtime_availability(garage, start + timedelta(minutes=30))
-        self.assertEqual(free_during, 1)
+        _, free_on_book = evaluate_garage_realtime_availability(garage, self.now)
+        self.assertEqual(free_on_book, 49)
 
         search_res = search_nearby_garages(
             lat=19.37124500,
             lng=-99.17834200,
-            current_dt=start + timedelta(minutes=30),
+            current_dt=self.now,
         )
-        self.assertEqual(search_res[0].espacios_disponibles_ahora, 1)
+        self.assertEqual(search_res[0].espacios_disponibles_ahora, 49)
 
-        # Once reservation reaches end time [12:00], it no longer occupies
-        _, free_after = evaluate_garage_realtime_availability(garage, end)
-        self.assertEqual(free_after, 2)
+        confirm_reservation(r1.id_reserva, by_system=True, now=self.now)
+        start_reservation_usage(r1.id_reserva, self.landlord, now=start + timedelta(minutes=5))
+
+        # Even past end time [14:45], while not vacated/cancelled, space remains occupied (49)
+        _, free_past_end_in_use = evaluate_garage_realtime_availability(
+            garage, end + timedelta(minutes=15)
+        )
+        self.assertEqual(free_past_end_in_use, 49)
+
+        # Once vacated (FINALIZADA), immediately increments from 49 back to 50
+        finish_reservation(
+            r1.id_reserva,
+            self.landlord,
+            real_checkout_dt=end + timedelta(minutes=15),
+            now=end + timedelta(minutes=15),
+        )
+        _, free_after_vacate = evaluate_garage_realtime_availability(
+            garage, end + timedelta(minutes=15)
+        )
+        self.assertEqual(free_after_vacate, 50)
 
     def test_list_reservations_for_user_views(self):
         garage = _create_garage_with_schedule(self.landlord, spaces=2)
