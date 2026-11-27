@@ -61,6 +61,7 @@ class HostFinancialMovementSerializer(serializers.Serializer):
     estado = serializers.CharField()
     estado_reserva = serializers.CharField(required=False)
     fecha_pago = serializers.DateTimeField()
+    fecha_referencia = serializers.DateTimeField(required=False)
 
 
 class HostFinancialSummarySerializer(serializers.Serializer):

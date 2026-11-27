@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Count, F, FloatField, IntegerField, OuterRef, Subquery, Value
+from django.db.models import Count, F, FloatField, IntegerField, OuterRef, Q, Subquery, Value
 from django.db.models.functions import ACos, Cast, Coalesce, Cos, Greatest, Least, Radians, Sin
 from django.utils import timezone
 
@@ -337,19 +337,23 @@ def validate_availability_slots(slots) -> list[dict]:
     return cleaned_slots
 
 
+def _active_occupancy_q(check_dt: datetime) -> Q:
+    """Match any EN_USO stay plus SOLICITADA/CONFIRMADA reservations overlapping check_dt."""
+    return Q(estado=ReservationStatus.EN_USO) | Q(
+        estado__in=(ReservationStatus.SOLICITADA, ReservationStatus.CONFIRMADA),
+        fecha_hora_inicio__lte=check_dt,
+        fecha_hora_fin__gt=check_dt,
+    )
+
+
 def get_active_reservations_count(garage: Cochera, reference_dt: datetime | None = None) -> int:
-    """Count active overlapping reservations occupying garage spaces (Module 03)."""
+    """Count active reservations currently occupying garage spaces (Module 03)."""
     check_dt = reference_dt or timezone.now()
     annotated_count = getattr(garage, '_active_reservations_now', None)
     annotated_ref = getattr(garage, '_active_reservations_ref_dt', None)
     if annotated_count is not None and (reference_dt is None or annotated_ref == check_dt):
         return int(annotated_count)
-    return Reserva.objects.filter(
-        cochera=garage,
-        estado__in=ACTIVE_RESERVATION_STATUSES,
-        fecha_hora_inicio__lte=check_dt,
-        fecha_hora_fin__gt=check_dt,
-    ).count()
+    return Reserva.objects.filter(cochera=garage).filter(_active_occupancy_q(check_dt)).count()
 
 
 def get_garage_rating_summary(garage: Cochera) -> dict:
@@ -381,12 +385,32 @@ def evaluate_garage_realtime_availability(
     return True, available_spaces
 
 
-def _fetch_garage_with_relations(garage_id: int) -> Cochera:
+def _build_active_reservations_subquery(reference_dt: datetime):
     return (
+        Reserva.objects.filter(cochera_id=OuterRef('pk'))
+        .filter(_active_occupancy_q(reference_dt))
+        .order_by()
+        .values('cochera_id')
+        .annotate(active_count=Count('id_reserva'))
+        .values('active_count')[:1]
+    )
+
+
+def _fetch_garage_with_relations(garage_id: int) -> Cochera:
+    reference_dt = timezone.now()
+    garage = (
         Cochera.objects.select_related('arrendador')
         .prefetch_related('fotos', 'disponibilidades')
+        .annotate(
+            _active_reservations_now=Coalesce(
+                Subquery(_build_active_reservations_subquery(reference_dt), output_field=IntegerField()),
+                Value(0),
+            ),
+        )
         .get(id_cochera=garage_id)
     )
+    garage._active_reservations_ref_dt = reference_dt
+    return garage
 
 
 def create_garage(landlord: Usuario, data: dict) -> Cochera:
@@ -567,9 +591,16 @@ def validate_garage_publication(
 
 def get_garage_detail_for_user(garage_id: int, user: Usuario) -> Cochera:
     """Return garage detail enforcing visibility rules (APROBADA public, others owner/admin only)."""
+    reference_dt = timezone.now()
     garage = (
         Cochera.objects.select_related('arrendador')
         .prefetch_related('fotos', 'disponibilidades')
+        .annotate(
+            _active_reservations_now=Coalesce(
+                Subquery(_build_active_reservations_subquery(reference_dt), output_field=IntegerField()),
+                Value(0),
+            ),
+        )
         .filter(id_cochera=garage_id)
         .first()
     )
@@ -581,6 +612,7 @@ def get_garage_detail_for_user(garage_id: int, user: Usuario) -> Cochera:
     if garage.estado_cochera != GarageStatus.APROBADA and not (is_owner or is_admin):
         raise NotFoundError('Cochera no encontrada.')
 
+    garage._active_reservations_ref_dt = reference_dt
     return garage
 
 
@@ -600,13 +632,23 @@ def list_landlord_garages(landlord: Usuario, status_filter: str | None = None) -
     """List all garages owned by the authenticated active landlord."""
     _check_active_landlord(landlord)
 
+    reference_dt = timezone.now()
     queryset = (
         Cochera.objects.filter(arrendador=landlord)
-        .prefetch_related('fotos')
+        .prefetch_related('fotos', 'disponibilidades')
+        .annotate(
+            _active_reservations_now=Coalesce(
+                Subquery(_build_active_reservations_subquery(reference_dt), output_field=IntegerField()),
+                Value(0),
+            ),
+        )
         .order_by('-id_cochera')
     )
     queryset = _filter_queryset_by_status(queryset, status_filter)
-    return list(queryset)
+    garages = list(queryset)
+    for item in garages:
+        item._active_reservations_ref_dt = reference_dt
+    return garages
 
 
 def list_admin_garages(admin_user: Usuario, status_filter: str | None = None) -> list[Cochera]:
@@ -708,12 +750,8 @@ def search_nearby_garages(
 
     reference_dt = current_dt or timezone.now()
     active_reservations_subquery = (
-        Reserva.objects.filter(
-            cochera_id=OuterRef('pk'),
-            estado__in=ACTIVE_RESERVATION_STATUSES,
-            fecha_hora_inicio__lte=reference_dt,
-            fecha_hora_fin__gt=reference_dt,
-        )
+        Reserva.objects.filter(cochera_id=OuterRef('pk'))
+        .filter(_active_occupancy_q(reference_dt))
         .order_by()
         .values('cochera_id')
         .annotate(active_count=Count('id_reserva'))

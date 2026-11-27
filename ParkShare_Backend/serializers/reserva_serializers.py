@@ -74,6 +74,7 @@ class ReservaListSerializer(serializers.ModelSerializer):
             'monto_penalizacion',
             'multa_acumulada',
             'monto_total',
+            'fecha_creacion',
         ]
 
     def get_multa_acumulada(self, obj: Reserva) -> str:
@@ -168,6 +169,7 @@ class ReservaPatchResponseSerializer(serializers.ModelSerializer):
             'monto_penalizacion',
             'multa_acumulada',
             'monto_total',
+            'fecha_creacion',
         ]
 
     def get_multa_acumulada(self, obj: Reserva) -> str:

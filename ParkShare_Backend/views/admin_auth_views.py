@@ -1,4 +1,5 @@
-from django.db.models import Q
+from django.db.models import Count, Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -7,6 +8,9 @@ from rest_framework.views import APIView
 from ParkShare_Backend.models import (
     AccountStatus,
     DocumentoArrendador,
+    Queja,
+    Sancion,
+    SanctionStatus,
     UserRole,
     Usuario,
     VerificationStatus,
@@ -119,7 +123,12 @@ class AdminAccountListView(APIView):
     permission_classes = [IsAuthenticated, IsAdminRole]
 
     def get(self, request):
-        queryset = Usuario.objects.order_by('id_usuario')
+        queryset = Usuario.objects.annotate(
+            _quejas_recibidas_count=Count('quejas_recibidas', distinct=True),
+            _quejas_enviadas_count=Count('quejas_enviadas', distinct=True),
+            _sanciones_count=Count('sanciones', distinct=True),
+            _suspensiones_count=Count('received_suspensions', distinct=True),
+        ).order_by('id_usuario')
 
         query = (request.query_params.get('q') or '').strip()
         if query:
@@ -152,7 +161,12 @@ class AdminAccountDetailView(APIView):
 
     def get(self, request, pk: int):
         user = (
-            Usuario.objects.prefetch_related('received_suspensions')
+            Usuario.objects.annotate(
+                _quejas_recibidas_count=Count('quejas_recibidas', distinct=True),
+                _quejas_enviadas_count=Count('quejas_enviadas', distinct=True),
+                _sanciones_count=Count('sanciones', distinct=True),
+            )
+            .prefetch_related('received_suspensions')
             .filter(id_usuario=pk)
             .first()
         )
@@ -162,7 +176,50 @@ class AdminAccountDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        suspensions = list(user.received_suspensions.all())
+        def _iso_local(dt_val):
+            if dt_val is None:
+                return ''
+            if hasattr(dt_val, 'isoformat'):
+                if timezone.is_aware(dt_val):
+                    return timezone.localtime(dt_val).isoformat()
+                return dt_val.isoformat()
+            return str(dt_val)
+
+        expected_complaints = int(
+            (
+                user._quejas_recibidas_count
+                if user.rol == UserRole.ARRENDADOR
+                else user._quejas_enviadas_count
+            )
+            or 0
+        )
+        expected_sanctions = int(user._sanciones_count or 0)
+
+        if expected_complaints > 0:
+            if user.rol == UserRole.ARRENDADOR:
+                complaints = list(
+                    Queja.objects.filter(arrendador=user).order_by('-fecha_creacion', '-id_queja')
+                )
+            else:
+                complaints = list(
+                    Queja.objects.filter(arrendatario=user).order_by('-fecha_creacion', '-id_queja')
+                )
+        else:
+            complaints = []
+
+        if expected_sanctions > 0:
+            sanctions = list(
+                Sancion.objects.filter(arrendador=user).order_by('-fecha_creacion', '-id_sancion')
+            )
+        else:
+            sanctions = []
+
+        suspensions = sorted(
+            list(user.received_suspensions.all()),
+            key=lambda s: (s.fecha_suspension, s.id_suspension),
+            reverse=True,
+        )
+
         return Response(
             {
                 'id_usuario': user.id_usuario,
@@ -176,12 +233,34 @@ class AdminAccountDetailView(APIView):
                 'modelo_vehiculo': user.modelo_vehiculo,
                 'cuenta_cobro': user.cuenta_cobro,
                 'resumen_disciplinario': {
-                    'total_quejas': 0,
-                    'total_sanciones': 0,
+                    'total_quejas': len(complaints),
+                    'total_sanciones': len(sanctions),
+                    'sanciones_vigentes': sum(
+                        1 for item in sanctions if item.estado == SanctionStatus.VIGENTE
+                    ),
                     'total_suspensiones': len(suspensions),
                 },
-                'historial_quejas': [],
-                'historial_sanciones': [],
+                'historial_quejas': [
+                    {
+                        'id_queja': item.id_queja,
+                        'reserva_id': item.reserva_id,
+                        'motivo_categoria': item.motivo_categoria,
+                        'descripcion': item.descripcion,
+                        'estado': item.estado,
+                        'fecha_creacion': _iso_local(item.fecha_creacion),
+                    }
+                    for item in complaints
+                ],
+                'historial_sanciones': [
+                    {
+                        'id_sancion': item.id_sancion,
+                        'queja_id': item.queja_id,
+                        'motivo': item.motivo,
+                        'estado': item.estado,
+                        'fecha_creacion': _iso_local(item.fecha_creacion),
+                    }
+                    for item in sanctions
+                ],
                 'historial_suspensiones': AccountSuspensionSerializer(suspensions, many=True).data,
             },
             status=status.HTTP_200_OK,

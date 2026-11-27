@@ -158,6 +158,8 @@ class ReviewLandlordRequestSerializer(serializers.Serializer):
 
 
 class AdminUserListSerializer(serializers.ModelSerializer):
+    resumen_disciplinario = serializers.SerializerMethodField()
+
     class Meta:
         model = Usuario
         fields = [
@@ -167,7 +169,19 @@ class AdminUserListSerializer(serializers.ModelSerializer):
             'telefono',
             'rol',
             'estado_cuenta',
+            'resumen_disciplinario',
         ]
+
+    def get_resumen_disciplinario(self, obj: Usuario) -> dict:
+        if obj.rol == UserRole.ARRENDADOR:
+            total_quejas = int(getattr(obj, '_quejas_recibidas_count', 0) or 0)
+        else:
+            total_quejas = int(getattr(obj, '_quejas_enviadas_count', 0) or 0)
+        return {
+            'total_quejas': total_quejas,
+            'total_sanciones': int(getattr(obj, '_sanciones_count', 0) or 0),
+            'total_suspensiones': int(getattr(obj, '_suspensiones_count', 0) or 0),
+        }
 
 
 class AccountSuspensionSerializer(serializers.ModelSerializer):

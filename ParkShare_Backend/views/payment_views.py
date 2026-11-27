@@ -78,6 +78,8 @@ class HostEarningsView(APIView):
             for item in summary.get('movimientos', []):
                 if hasattr(item.get('fecha_pago'), 'isoformat'):
                     item['fecha_pago'] = item['fecha_pago'].isoformat()
+                if hasattr(item.get('fecha_referencia'), 'isoformat'):
+                    item['fecha_referencia'] = item['fecha_referencia'].isoformat()
             return Response(summary, status=status.HTTP_200_OK)
         except (
             DomainValidationError,

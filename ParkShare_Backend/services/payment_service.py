@@ -345,6 +345,12 @@ def get_host_financial_summary(
         end_local = res.fecha_hora_fin.astimezone(MEXICO_TZ)
         schedule_label = f"{start_local.strftime('%Y-%m-%d %H:%M')} - {end_local.strftime('%H:%M')}"
 
+        reference_event_dt = payment.fecha_pago
+        if res.estado == ReservationStatus.FINALIZADA:
+            reference_event_dt = res.hora_salida_real or res.fecha_hora_fin or payment.fecha_pago
+        elif res.estado == ReservationStatus.CANCELADA:
+            reference_event_dt = payment.fecha_pago or res.fecha_hora_inicio
+
         movement_item = {
             'id_pago': payment.id_pago,
             'reserva_id': res.id_reserva,
@@ -357,6 +363,7 @@ def get_host_financial_summary(
             'estado': visual_status,
             'estado_reserva': res.estado,
             'fecha_pago': payment.fecha_pago,
+            'fecha_referencia': reference_event_dt,
         }
         if normalized_filter is None or visual_status == normalized_filter:
             all_movements.append(movement_item)
